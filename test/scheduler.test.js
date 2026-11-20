@@ -70,3 +70,25 @@ test('la planificación usa las horas con IA', () => {
   assert.equal(r.projects.p.totalHours, 8.5);
   assert.equal(r.projects.p.baseHours, 17);
 });
+
+test('registro de actividad describe cambios con autor', async () => {
+  const { diffActivity, appendActivity } = await import('../lib/activity.js');
+  const before = { team: [{ id: 'a', name: 'Ana' }], settings: {}, projects: [{ id: 'p', name: 'P', startDate: '2026-11-09', tasks: [
+    { id: 't1', title: 'Login', estimate: 8, status: 'todo' },
+    { id: 't2', title: 'Viejo', estimate: 2, status: 'todo' },
+  ] }] };
+  const after = structuredClone(before);
+  after.projects[0].tasks[0].status = 'doing';
+  after.projects[0].tasks[0].assignee = 'a';
+  after.projects[0].tasks.splice(1, 1);
+  after.projects[0].tasks.push({ id: 't3', title: 'Nuevo', estimate: 3, status: 'todo' });
+  const e = diffActivity(before, after, 'Ana', '2026-11-20T10:00');
+  const texts = e.map((x) => x.text);
+  assert.ok(texts.includes('movió "Login" a En progreso'));
+  assert.ok(texts.includes('asignó "Login" a Ana'));
+  assert.ok(texts.includes('agregó la tarea "Nuevo"'));
+  assert.ok(texts.includes('eliminó la tarea "Viejo"'));
+  assert.ok(e.every((x) => x.author === 'Ana' && x.projectId === 'p'));
+  assert.equal(diffActivity(before, structuredClone(before), 'Ana', 'x').length, 0);
+  assert.equal(appendActivity([{ id: 'old' }], e)[0].id, e[e.length - 1].id);
+});

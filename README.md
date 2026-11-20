@@ -15,6 +15,16 @@ Herramienta local para planificar proyectos por sprints. Le platicas cada proyec
 | **Cartera** | Todos los proyectos en una línea de tiempo, su prioridad, y un mapa de carga semanal por persona para ver dónde cabe un proyecto nuevo. |
 | **Plantillas** | Proyectos que se repiten (web, integración API, implementación en cliente). Puedes guardar cualquier proyecto como plantilla; usa las horas reales para que la siguiente estimación salga más precisa. |
 
+## Perfiles (ligeros)
+
+Al entrar, cada persona elige su nombre de la lista del **Equipo** (o escribe uno, si no está en la lista). La app lo recuerda en ese navegador.
+
+- **Mis tareas:** lo que tienes asignado en todos los proyectos (a mano o por el planificador), con horas pendientes, tareas de la semana y la fecha en que te desocupas. Desde ahí cambias el estado y registras horas restantes y reales.
+- **Tablero:** abre filtrado a tus tareas.
+- **Actividad:** cada cambio queda firmado con el nombre del perfil. Lo genera el servidor comparando antes y después de cada guardado. Los cambios del agente aparecen como "Nombre (vía agente)". Se ve en la pestaña *Actividad* de cada proyecto y en *Cartera*.
+- **Preferencias del agente:** el proveedor y el modelo se guardan por perfil en el servidor. La API key propia y el historial del chat se quedan solo en el navegador.
+- **No es autenticación:** todos entran con la misma `APP_PASSWORD` y cualquiera puede elegir cualquier nombre. Para cuentas individuales con su propio inicio de sesión haría falta un proveedor de identidad (Microsoft Entra ID, Google, Clerk…).
+
 ## Cómo calcula los tiempos
 
 - **Horario:** lunes a jueves 9:00–18:30 con 1 h de comida (14:00–15:00) = 8.5 h. Viernes 9:00–15:00 = 6 h. **Total: 40 h/semana.** Se puede cambiar en *Calendario y configuración*.

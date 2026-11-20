@@ -9,6 +9,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { loadDb, saveDb, storageKind } from './lib/store.js';
 import { chat, PROVIDERS, serverKeys, serverNow } from './lib/agent.js';
+import { diffActivity, appendActivity } from './lib/activity.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3210;
@@ -74,6 +75,11 @@ function authorized(req) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// Perfil ligero: el navegador indica quién está trabajando (no es autenticación, solo autoría)
+const authorFrom = (req) => {
+  try { return decodeURIComponent(String(req.headers['x-user-name'] || '')).trim().slice(0, 60) || 'Alguien'; } catch { return 'Alguien'; }
+};
+
 export async function handler(req, res) {
   const url = new URL(req.url, 'http://x');
   try {
@@ -86,8 +92,12 @@ export async function handler(req, res) {
     if (url.pathname === '/api/state' && req.method === 'PUT') {
       const body = await readBody(req);
       if (!body.db || !Array.isArray(body.db.projects)) return send(res, 400, { error: 'Formato inválido' });
-      await saveDb(body.db);
-      return send(res, 200, { ok: true });
+      // El historial de actividad lo escribe solo el servidor, a partir de las diferencias
+      const before = await loadDb();
+      const after = body.db;
+      after.activity = appendActivity(before.activity, diffActivity(before, after, authorFrom(req), serverNow()));
+      await saveDb(after);
+      return send(res, 200, { ok: true, activity: after.activity });
     }
     if (url.pathname === '/api/chat' && req.method === 'POST') {
       const body = await readBody(req);
@@ -97,6 +107,7 @@ export async function handler(req, res) {
           provider: body.provider, model: body.model, apiKey: body.apiKey || undefined,
           history: Array.isArray(body.history) ? body.history : [], text: body.text || 'Analiza los archivos adjuntos.',
           attachments: Array.isArray(body.attachments) ? body.attachments : [], projectId: body.projectId,
+          author: `${authorFrom(req)} (vía agente)`,
         });
         return send(res, 200, out);
       } catch (err) {

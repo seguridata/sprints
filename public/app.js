@@ -17,6 +17,18 @@ const ui = {
   sending: false,
 };
 
+// Perfil ligero: quién está usando este navegador ({ id del equipo o null, name }).
+// No es autenticación: sirve para "Mis tareas", filtros y para firmar la actividad.
+let profile = safeJson(localGet('profile'));
+const profileKey = () => (profile ? profile.id || `n:${profile.name}` : 'anon');
+function setProfile(p) {
+  profile = p;
+  localSet('profile', JSON.stringify(p));
+  ui.boardMember = p?.id || '';
+  ui.chatState = loadChat(aiCfg().provider);
+  ui.chatError = null;
+}
+
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -40,6 +52,7 @@ async function api(url, opts = {}) {
   const headers = { ...(opts.headers || {}) };
   const pass = sessionGet('appPassword');
   if (pass) headers['x-app-password'] = pass;
+  if (profile?.name) headers['x-user-name'] = encodeURIComponent(profile.name);
   const r = await fetch(url, { ...opts, headers });
   if (r.status === 401) {
     const ok = await askPassword(sessionGet('appPassword') ? 'Contraseña incorrecta, intenta de nuevo.' : '');
@@ -79,8 +92,13 @@ async function load() {
   storage = data.storage || 'archivo';
   if (!project() && db.projects.length) ui.projectId = db.projects[0].id;
   if (!db.projects.length && ui.view === 'proyecto') ui.view = 'cartera';
+  // Si la persona del perfil ya no está en el equipo, se conserva solo su nombre
+  if (profile?.id && !db.team.some((m) => m.id === profile.id)) setProfile({ id: null, name: profile.name });
+  if (!ui.profileApplied && profile) { ui.boardMember = profile.id || ''; ui.chatState = loadChat(aiCfg().provider); }
+  ui.profileApplied = true;
   recompute();
   render();
+  if (!profile) openProfilePicker();
 }
 function recompute() { sched = S.schedulePortfolioWithBaseline(db, S.nowLocalString()); }
 
@@ -91,7 +109,13 @@ function commit({ rerender = true } = {}) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     const r = await api('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ db }) });
-    if (!r.ok) alert('No se pudo guardar: ' + (await r.text()));
+    if (!r.ok) { alert('No se pudo guardar: ' + (await r.text())); return; }
+    // El servidor devuelve el historial de actividad actualizado (con autor)
+    const j = await r.json().catch(() => ({}));
+    if (Array.isArray(j.activity)) {
+      db.activity = j.activity;
+      if (ui.tab === 'actividad' && ui.view === 'proyecto' && $('#modal').hidden) render();
+    }
   }, 250);
 }
 
@@ -108,16 +132,17 @@ function render() {
     const sp = sched.projects[p.id];
     $('#pageTitle').textContent = p.name;
     $('#pageSubtitle').innerHTML = `${esc(p.client || '')}${p.client ? ' · ' : ''}Inicio ${S.fmtDate(p.startDate)} · Término estimado <strong>${sp ? S.fmtDate(sp.end) : '—'}</strong> · Sprints de ${p.sprintWeeks} semana(s)${p.status === 'archivado' ? ' · <span class="pill">Archivado</span>' : ''}`;
-    const T = [['resumen', 'Resumen'], ['tareas', 'Tareas'], ['gantt', 'Gantt'], ['tablero', 'Tablero'], ['burndown', 'Burndown']];
+    const T = [['resumen', 'Resumen'], ['tareas', 'Tareas'], ['gantt', 'Gantt'], ['tablero', 'Tablero'], ['burndown', 'Burndown'], ['actividad', 'Actividad']];
     tabs.innerHTML = T.map(([id, l]) => `<button data-tab="${id}" class="${ui.tab === id ? 'active' : ''}">${l}</button>`).join('');
     tabs.hidden = false;
-    const fn = { resumen: viewResumen, tareas: viewTareas, gantt: viewGantt, tablero: viewTablero, burndown: viewBurndown }[ui.tab] || viewResumen;
+    const fn = { resumen: viewResumen, tareas: viewTareas, gantt: viewGantt, tablero: viewTablero, burndown: viewBurndown, actividad: viewActividad }[ui.tab] || viewResumen;
     if (p.status === 'archivado' && ['gantt', 'tablero', 'burndown'].includes(ui.tab)) {
       $('#view').innerHTML = `<div class="empty">El proyecto está archivado y no se planifica. Reactívalo desde Resumen → Editar proyecto.</div>`;
     } else fn(p);
   } else {
     tabs.hidden = true;
     const map = {
+      mis: [profile ? `Mis tareas — ${profile.name}` : 'Mis tareas', 'Lo que tienes asignado en todos los proyectos, en orden de fechas', viewMisTareas],
       cartera: ['Cartera y carga del equipo', 'Todos los proyectos en una sola línea de tiempo y la ocupación semanal de cada persona', viewCartera],
       equipo: ['Equipo', 'Personas, rol y dedicación; se comparten entre proyectos según prioridad', viewEquipo],
       plantillas: ['Plantillas', 'Arranca proyectos repetibles en segundos', viewPlantillas],
@@ -137,12 +162,144 @@ function storageWarning() {
 }
 
 function renderSidebar() {
+  const me = profile?.id ? db.team.find((m) => m.id === profile.id) : null;
+  $('#profileChip').innerHTML = profile
+    ? `<span class="dot" style="background:${profile.id ? memberColor(profile.id) : 'var(--muted)'}"></span><span class="profile-name" title="${esc(profile.name)}">${esc(profile.name)}${me?.role ? ` <span class="muted small">· ${esc(me.role)}</span>` : ''}</span><a href="#" data-act="profile">Cambiar</a>`
+    : '<a href="#" data-act="profile">¿Quién eres? Elige tu perfil</a>';
+  const mine = profile?.id ? myTasks().filter((x) => x.t.status !== 'done').length : 0;
+  $('#myCount').textContent = mine ? String(mine) : '';
+  $('#myCount').hidden = !mine;
   $('#projectList').innerHTML = db.projects
     .slice()
     .sort((a, b) => (a.status === 'archivado') - (b.status === 'archivado') || (a.priority || 99) - (b.priority || 99))
     .map((p) => `<a href="#" data-project="${p.id}" class="${ui.view === 'proyecto' && ui.projectId === p.id ? 'active' : ''}" style="${p.status === 'archivado' ? 'opacity:.55' : ''}"><span class="dot" style="background:${projectColor(p)}"></span>${esc(p.name)}</a>`)
     .join('') || '<div class="muted small" style="padding:6px 8px">Sin proyectos. Crea uno o pídeselo al agente.</div>';
   $$('.navlink').forEach((a) => a.classList.toggle('active', ui.view === a.dataset.view));
+}
+
+// ================= perfil ligero =================
+function openProfilePicker() {
+  openModal('¿Quién eres?', `
+    <p class="muted small">Elige tu nombre para ver tus tareas y para que tus cambios queden firmados en la actividad. Se recuerda en este navegador. No es una cuenta con contraseña propia: cualquiera puede elegir cualquier nombre.</p>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin:10px 0">
+      ${db.team.map((m) => `<button class="btn" data-pick="${m.id}" style="justify-content:flex-start;padding:10px 12px"><span class="dot" style="background:${memberColor(m.id)}"></span><span style="text-align:left"><strong>${esc(m.name)}</strong><br><span class="muted small">${esc(m.role || 'Sin rol')} · ${Math.round((Number(m.allocation) || 1) * 100)} %</span></span></button>`).join('') || '<span class="muted small">Todavía no hay personas en el Equipo.</span>'}
+    </div>
+    <form id="otherForm" class="row">
+      <label class="field" style="flex:1">¿No estás en la lista? Escribe tu nombre<input name="name" maxlength="60" placeholder="Por ejemplo: Laura (Dirección)"></label>
+      <button class="btn" type="submit" style="align-self:flex-end">Entrar</button>
+    </form>
+    <p class="muted small">Para que aparezcas en la lista y se te asignen tareas, agrégate en <strong>Equipo</strong>.</p>`, (el) => {
+    $$('[data-pick]', el).forEach((b) => b.addEventListener('click', () => {
+      const m = db.team.find((x) => x.id === b.dataset.pick);
+      setProfile({ id: m.id, name: m.name });
+      closeModal();
+      ui.view = 'mis';
+      render();
+    }));
+    $('#otherForm', el).onsubmit = (e) => {
+      e.preventDefault();
+      const name = String(new FormData(e.target).get('name') || '').trim();
+      if (!name) return;
+      setProfile({ id: null, name });
+      closeModal();
+      render();
+    };
+  });
+}
+
+// Tareas de la persona del perfil (asignadas a mano o por el planificador), en todos los proyectos activos
+function myTasks() {
+  if (!profile?.id) return [];
+  const out = [];
+  for (const p of db.projects) {
+    if (p.status === 'archivado') continue;
+    for (const t of p.tasks) {
+      const st = sched.tasks[t.id];
+      if (st && st.assignee === profile.id) out.push({ p, t, st });
+    }
+  }
+  return out.sort((a, b) => a.st.start - b.st.start);
+}
+
+function viewMisTareas() {
+  if (!profile) { $('#view').innerHTML = '<div class="empty"><button class="btn primary" data-act="profile">Elegir mi perfil</button></div>'; return; }
+  if (!profile.id) {
+    $('#view').innerHTML = `<div class="empty">Entraste como <strong>${esc(profile.name)}</strong>, que no está en el Equipo, así que no tienes tareas asignadas.<br><br><button class="btn" data-act="profile">Cambiar de perfil</button> <button class="btn" data-view="equipo">Ir a Equipo</button></div>`;
+    return;
+  }
+  const all = myTasks();
+  const nowDay = Math.floor(sched.now / 1440);
+  const weekEnd = (nowDay - ((((nowDay + 4) % 7) + 6) % 7) + 7) * 1440;
+  const active = all.filter((x) => x.t.status === 'doing' || x.t.status === 'review');
+  const todo = all.filter((x) => x.t.status === 'todo');
+  const done = all.filter((x) => x.t.status === 'done').sort((a, b) => (b.t.doneAt || '').localeCompare(a.t.doneAt || '')).slice(0, 8);
+  const pending = [...active, ...todo];
+  const pendingHours = pending.reduce((a, x) => a + S.taskRemaining(x.t, db.settings), 0);
+  const thisWeek = pending.filter((x) => x.st.start < weekEnd).length;
+  const late = pending.filter((x) => x.st.late || (x.t.dueDate && x.st.end > S.toAbs(x.t.dueDate) + 1440));
+  const freeAt = pending.length ? Math.max(...pending.map((x) => x.st.end)) : null;
+
+  const row = (x) => `<tr data-id="${x.t.id}" data-pid="${x.p.id}">
+      <td><span class="dot" style="background:${projectColor(x.p)};display:inline-block"></span> <span class="small">${esc(x.p.name)}</span></td>
+      <td><strong>${esc(x.t.title)}</strong>${x.st.autoAssigned ? ' <span class="pill" title="El planificador te la asignó porque te desocupas primero">auto</span>' : ''}${x.st.late ? ' <span class="pill bad">tarde</span>' : ''}</td>
+      <td style="min-width:120px"><select data-f="status">${S.STATUSES.map((s) => `<option value="${s.id}" ${x.t.status === s.id ? 'selected' : ''}>${s.label}</option>`).join('')}</select></td>
+      <td style="width:80px"><input data-f="remaining" type="number" min="0" step="0.5" value="${x.t.status === 'done' ? 0 : x.t.remaining ?? ''}" placeholder="${S.taskEstimate(x.t, db.settings)}" ${x.t.status === 'done' ? 'disabled' : ''} title="Horas restantes"></td>
+      <td style="width:80px"><input data-f="actualHours" type="number" min="0" step="0.5" value="${x.t.actualHours ?? ''}" title="Horas reales invertidas"></td>
+      <td class="small">${x.t.status === 'done' ? `Terminó ${S.fmtDate(x.t.doneAt)}` : `${S.fmtDate(x.st.start, true)} → ${S.fmtDate(x.st.end, true)}`}</td>
+      <td class="num">S${(x.st.sprint ?? 0) + 1}</td>
+    </tr>`;
+  const table = (title, list, empty) => `<h3>${title} <span class="muted">${list.length}</span></h3>
+    <div class="table-wrap"><table class="data myTable"><thead><tr><th>Proyecto</th><th>Tarea</th><th>Estado</th><th>Restantes</th><th>Reales</th><th>Fechas</th><th class="num">Sprint</th></tr></thead>
+    <tbody>${list.map(row).join('') || `<tr><td colspan="7" class="muted">${empty}</td></tr>`}</tbody></table></div>`;
+
+  $('#view').innerHTML = `
+    <div class="grid kpis">
+      <div class="card kpi"><div class="label">Horas pendientes</div><div class="value">${h1(pendingHours)} h</div><div class="hint">${pending.length} tarea(s)</div></div>
+      <div class="card kpi"><div class="label">Para esta semana</div><div class="value">${thisWeek}</div><div class="hint">tareas que empiezan antes del lunes</div></div>
+      <div class="card kpi"><div class="label">Con riesgo</div><div class="value">${late.length}</div><div class="hint">${late.length ? 'terminarían después de su fecha límite' : 'ninguna después de su fecha límite'}</div></div>
+      <div class="card kpi"><div class="label">Te desocupas</div><div class="value">${freeAt ? S.fmtDate(freeAt) : 'Ya'}</div><div class="hint">según el plan actual</div></div>
+    </div>
+    ${table('En curso', active, 'Nada en progreso. Arranca la siguiente de “Por hacer”.')}
+    ${table('Por hacer', todo, 'Sin pendientes.')}
+    ${table('Terminadas recientemente', done, 'Aún no terminas tareas.')}
+    <p class="muted small">Registra las horas reales al terminar: con ellas se mide la precisión y el factor IA real.</p>`;
+
+  $$('.myTable').forEach((tb) => tb.addEventListener('change', (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    const p = db.projects.find((x) => x.id === tr.dataset.pid);
+    const t = p?.tasks.find((x) => x.id === tr.dataset.id);
+    if (!t) return;
+    const f = e.target.dataset.f;
+    const v = e.target.value;
+    const now = S.nowLocalString();
+    if (f === 'status') {
+      S.setTaskStatus(t, v, now, db.settings);
+      if (v === 'done' && !t.actualHours) {
+        const h = prompt(`Horas reales invertidas en "${t.title}" (opcional):`, S.taskEstimate(t, db.settings));
+        if (h != null && h !== '' && !isNaN(Number(h))) t.actualHours = Number(h);
+      }
+    } else if (f === 'remaining') S.setTaskRemaining(t, v, now);
+    else if (f === 'actualHours') t.actualHours = v === '' ? null : Number(v);
+    commit();
+  }));
+}
+
+function activityList(entries) {
+  if (!entries.length) return '<div class="empty">Sin actividad registrada todavía.</div>';
+  let html = '';
+  let day = null;
+  for (const e of entries) {
+    const d = (e.at || '').slice(0, 10);
+    if (d !== day) { day = d; html += `<h3>${S.fmtDate(d)}</h3>`; }
+    html += `<div class="activity-row"><span class="muted small">${(e.at || '').slice(11, 16)}</span> <strong>${esc(e.author)}</strong> ${esc(e.text)}${e.projectName && ui.view !== 'proyecto' ? ` <span class="muted small">· ${esc(e.projectName)}</span>` : ''}</div>`;
+  }
+  return html;
+}
+
+function viewActividad(p) {
+  const entries = (db.activity || []).filter((e) => e.projectId === p.id).slice(0, 200);
+  $('#view').innerHTML = `<div class="card">${activityList(entries)}</div>
+    <p class="muted small">Cada cambio se firma con el nombre del perfil elegido. Los cambios hechos por el agente dicen “vía agente”.</p>`;
 }
 
 // ================= vista: resumen =================
@@ -605,6 +762,7 @@ function viewCartera() {
       return `<td class="cell" style="background:${bg};color:${fg}" title="${h1(c.used)} de ${h1(c.capacity)} h efectivas">${c.capacity === 0 ? '—' : `${Math.round(ratio * 100)}%`}</td>`;
     }).join('')}</tr>`).join('')}</tbody></table></div>
     <div class="muted small" style="margin-top:6px">Las semanas en verde son capacidad libre: ahí cabe un proyecto nuevo. Pregúntale al agente “¿cuándo terminaríamos un proyecto de 120 h si empezamos el lunes?”.</div></div>`;
+  html += `<div class="card" style="margin-top:12px"><h2>Actividad reciente</h2>${activityList((db.activity || []).slice(0, 15))}</div>`;
   $('#view').innerHTML = html;
 
   // mini Gantt de cartera
@@ -1007,6 +1165,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'ai-settings': e.preventDefault(); openAiSettings(); break;
+    case 'profile': e.preventDefault(); openProfilePicker(); break;
     case 'ai-add': {
       const name = prompt('Nombre del tipo de trabajo (debe coincidir con el rol o la fase de las tareas):');
       if (name && db.settings.ai.factors[name.trim()] == null) { db.settings.ai.factors[name.trim()] = 0.7; commit(); }
@@ -1177,12 +1336,17 @@ const TOOL_LABELS = {
 // ---------- ajustes del agente (por navegador) ----------
 // Cada persona elige proveedor y modelo, y puede usar su propia API key. La llave propia se guarda
 // solo en este navegador y viaja al servidor en cada mensaje; si no hay, se usa la del .env del servidor.
-const aiCfg = () => ({
-  provider: localGet('aiProvider') || 'anthropic',
-  model: (p) => localGet(`aiModel_${p}`) || '',
-  key: (p) => localGet(`aiKey_${p}`) || '',
-});
-const chatKey = (p) => `chat_${p}`;
+// Proveedor y modelo se guardan por perfil en el servidor (te siguen a cualquier computadora).
+// La API key propia y el historial del chat se quedan solo en este navegador.
+const aiCfg = () => {
+  const pref = db?.profilePrefs?.[profileKey()];
+  return {
+    provider: pref?.provider || localGet('aiProvider') || 'anthropic',
+    model: (p) => (pref?.models ? pref.models[p] || '' : localGet(`aiModel_${p}`) || ''),
+    key: (p) => localGet(`aiKey_${p}`) || '',
+  };
+};
+const chatKey = (p) => `chat_${p}_${profileKey()}`;
 function loadChat(p) {
   const raw = safeJson(localGet(chatKey(p))) || (p === 'anthropic' && Array.isArray(safeJson(localGet('chatHistory'))) ? { messages: safeJson(localGet('chatHistory')), usage: {} } : null);
   return raw && Array.isArray(raw.messages) ? raw : { messages: [], usage: {} };
@@ -1237,6 +1401,11 @@ function openAiSettings() {
         localSet(`aiKey_${id}`, String(f.get(`key_${id}`) || '').trim());
       }
       const prov = f.get('provider');
+      if (profile) {
+        db.profilePrefs ||= {};
+        db.profilePrefs[profileKey()] = { provider: prov, models: Object.fromEntries(Object.keys(providers).map((id) => [id, String(f.get(`model_${id}`) || '').trim()])) };
+        commit({ rerender: false });
+      }
       if (prov !== cfg.provider) {
         // Cada proveedor guarda su propia conversación (los formatos de mensajes no son compatibles)
         localSet('aiProvider', prov);

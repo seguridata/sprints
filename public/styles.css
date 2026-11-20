@@ -189,3 +189,10 @@ label.field input, label.field select, label.field textarea { font: inherit; fon
   .board { grid-template-columns: 1fr; }
   .gantt { grid-template-columns: 160px 1fr; }
 }
+
+/* Perfil ligero y actividad */
+.profile-chip { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin: 0 0 12px; border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+.profile-chip .profile-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.profile-chip a { font-size: 12px; white-space: nowrap; }
+.activity-row { padding: 6px 0; border-bottom: 1px solid var(--grid); line-height: 1.4; }
+.activity-row:last-child { border-bottom: 0; }
