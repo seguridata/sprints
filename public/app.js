@@ -21,6 +21,8 @@ const ui = {
 // `profile.id` es la persona del Equipo ligada a la cuenta (para "Mis tareas"); puede ser null.
 let me = null;
 let profile = null;
+let authMode = 'password'; // 'google' cuando el servidor tiene configurado el inicio con Google
+let authDomain = 'seguridata.com';
 const profileKey = () => me?.id || 'anon';
 const isAdmin = () => me?.role === 'admin';
 
@@ -58,6 +60,27 @@ const postAuth = (body) => fetch('/api/auth', { method: 'POST', credentials: 'sa
 async function showLogin() {
   const info = await (await fetch('/api/auth', { credentials: 'same-origin' })).json();
   if (info.user) return;
+  authMode = info.mode || 'password';
+  authDomain = info.domain || authDomain;
+  // Error devuelto por el regreso de Google (?login_error=...)
+  const params = new URLSearchParams(location.search);
+  const loginError = params.get('login_error');
+  if (loginError) history.replaceState(null, '', location.pathname);
+  if (authMode === 'google') {
+    return new Promise(() => {
+      openModal('Iniciar sesión', `
+        <div class="grid" style="text-align:center;padding:8px 0 4px">
+          <img src="/logo-seguridata.webp" alt="SeguriData" style="width:220px;margin:0 auto;background:#fff;border-radius:8px;padding:6px 8px">
+          <p>Entra con tu cuenta de Google de la empresa.</p>
+          ${loginError ? `<p class="pill bad" style="justify-content:center">${esc(loginError)}</p>` : ''}
+          <a class="btn primary" href="/api/auth?action=google" style="justify-content:center;padding:10px 16px;text-decoration:none">
+            <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
+            Entrar con Google
+          </a>
+          <p class="muted small">Solo se aceptan cuentas <strong>@${esc(authDomain)}</strong>.</p>
+        </div>`, null, { locked: true });
+    });
+  }
   return new Promise((resolve) => {
     const setup = info.needsSetup;
     openModal(setup ? 'Crear la cuenta de administrador' : 'Iniciar sesión', setup ? `
@@ -98,6 +121,8 @@ function openAccountMenu() {
   openModal('Mi cuenta', `
     <p><strong>${esc(me.name)}</strong> · ${esc(me.email)} · <span class="pill ${isAdmin() ? 'good' : ''}">${isAdmin() ? 'Administrador' : 'Miembro'}</span></p>
     <p class="muted small">${profile?.id ? `Ligada a <strong>${esc(memberName(profile.id))}</strong> del Equipo.` : 'Tu cuenta no está ligada a una persona del Equipo, así que no tienes "Mis tareas". Un administrador puede ligarla en Usuarios.'}</p>
+    ${authMode === 'google' ? `<p class="muted small">Entras con tu cuenta de Google @${esc(authDomain)}; la contraseña se administra en Google.</p>
+    <div class="row"><span class="spacer"></span><button type="button" class="btn danger" id="logoutBtn">Cerrar sesión</button></div>` : `
     <form id="pwForm" class="grid">
       <h3>Cambiar contraseña</h3>
       <div class="form-grid">
@@ -106,8 +131,9 @@ function openAccountMenu() {
       </div>
       <p class="pill" id="pwMsg" hidden></p>
       <div class="row"><button type="button" class="btn danger" id="logoutBtn">Cerrar sesión</button><span class="spacer"></span><button class="btn primary" type="submit">Cambiar contraseña</button></div>
-    </form>`, (el) => {
+    </form>`}`, (el) => {
     $('#logoutBtn', el).onclick = async () => { await postAuth({ action: 'logout' }); location.reload(); };
+    if (!$('#pwForm', el)) return;
     $('#pwForm', el).onsubmit = async (e) => {
       e.preventDefault();
       const r = await postAuth({ action: 'password', ...Object.fromEntries(new FormData(e.target)) });
@@ -128,8 +154,11 @@ async function load() {
   if (!r.ok) { $('#view').innerHTML = `<div class="empty">${esc(data.error || 'No se pudo cargar')}</div>`; return; }
   db = data.db;
   me = data.me;
+  authMode = data.auth?.mode || authMode;
+  authDomain = data.auth?.domain || authDomain;
   profile = { id: me.memberId && db.team.some((m) => m.id === me.memberId) ? me.memberId : null, name: me.name };
   document.body.classList.toggle('member', !isAdmin());
+  document.body.classList.add('ready');
   providers = data.providers || {};
   storage = data.storage || 'archivo';
   if (!project() && db.projects.length) ui.projectId = db.projects[0].id;
@@ -331,28 +360,31 @@ async function viewUsuarios() {
         <li><strong>Administrador:</strong> ve y edita todo: proyectos, equipo, configuración, plantillas y usuarios.</li>
         <li><strong>Miembro:</strong> ve solo los proyectos donde está asignado (en “Editar proyecto → Personas asignadas”) y los que no tienen personas marcadas (de todo el equipo). Puede trabajar las tareas de esos proyectos, pero no crear o borrar proyectos ni cambiar equipo o configuración.</li>
         <li>Liga cada cuenta con su persona del <strong>Equipo</strong> para que tenga “Mis tareas” y los permisos por proyecto.</li>
+        ${authMode === 'google' ? `<li><strong>Acceso con Google:</strong> cualquier cuenta @${esc(authDomain)} puede entrar; la primera vez se crea como miembro sin proyectos privados. Puedes darla de alta antes para que entre ya con su rol y su persona. Para impedirle la entrada, <strong>desactívala</strong>.</li>` : ''}
       </ul>
     </div>
-    <div class="table-wrap"><table class="data" id="usersTable"><thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Persona del Equipo</th><th>Alta</th><th></th></tr></thead><tbody>
+    <div class="table-wrap"><table class="data" id="usersTable"><thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Persona del Equipo</th><th>${authMode === 'google' ? 'Último acceso' : 'Alta'}</th><th></th></tr></thead><tbody>
       ${users.map((u) => `<tr data-uid="${u.id}">
         <td><input data-f="name" value="${esc(u.name)}">${u.id === me.id ? ' <span class="pill">tú</span>' : ''}</td>
         <td class="small">${esc(u.email)}</td>
         <td style="width:140px"><select data-f="role"><option value="miembro" ${u.role !== 'admin' ? 'selected' : ''}>Miembro</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrador</option></select></td>
         <td style="width:180px"><select data-f="memberId">${teamOpts(u.memberId)}</select></td>
-        <td class="small">${S.fmtDate(u.createdAt)}</td>
-        <td style="white-space:nowrap"><button class="btn small" data-act="user-reset">Restablecer contraseña</button>${u.id === me.id ? '' : '<button class="btn ghost small danger" data-act="user-del">✕</button>'}</td>
+        <td class="small">${authMode === 'google' ? (u.lastLogin ? S.fmtDate(u.lastLogin, true) : '<span class="muted">Aún no entra</span>') : S.fmtDate(u.createdAt)}</td>
+        <td style="white-space:nowrap">${u.disabled ? '<span class="pill bad">Desactivada</span> ' : ''}${authMode === 'google'
+          ? (u.id === me.id ? '' : `<button class="btn small" data-act="user-toggle" data-disabled="${u.disabled ? '0' : '1'}">${u.disabled ? 'Reactivar' : 'Desactivar'}</button>`)
+          : `<button class="btn small" data-act="user-reset">Restablecer contraseña</button>${u.id === me.id ? '' : '<button class="btn ghost small danger" data-act="user-del">✕</button>'}`}</td>
       </tr>`).join('')}
     </tbody></table></div>
     <form id="newUser" class="card" style="margin-top:12px">
       <h2>Agregar usuario</h2>
       <div class="form-grid">
         <label class="field">Nombre<input name="name" required maxlength="60"></label>
-        <label class="field">Correo<input name="email" type="email" required></label>
+        <label class="field">Correo<input name="email" type="email" required ${authMode === 'google' ? `placeholder="nombre@${esc(authDomain)}"` : ''}></label>
         <label class="field">Rol<select name="role"><option value="miembro">Miembro</option><option value="admin">Administrador</option></select></label>
         <label class="field">Persona del Equipo<select name="memberId">${teamOpts(db.team.find((m) => !linked.has(m.id))?.id || '')}</select></label>
-        <label class="field">Contraseña inicial<input name="password" required minlength="10" value="${genPassword()}"></label>
+        ${authMode === 'google' ? '' : `<label class="field">Contraseña inicial<input name="password" required minlength="10" value="${genPassword()}"></label>`}
       </div>
-      <p class="muted small">Comparte la contraseña inicial por un canal privado y pide que la cambien en “Mi cuenta”. La URL de la app es ${esc(location.origin)}.</p>
+      <p class="muted small">${authMode === 'google' ? `La persona entra con su cuenta de Google @${esc(authDomain)} en ${esc(location.origin)}.` : `Comparte la contraseña inicial por un canal privado y pide que la cambien en “Mi cuenta”. La URL de la app es ${esc(location.origin)}.`}</p>
       <p class="pill bad" id="userErr" hidden></p>
       <div class="row"><span class="spacer"></span><button class="btn primary" type="submit">Crear usuario</button></div>
     </form>`;
@@ -378,6 +410,12 @@ async function viewUsuarios() {
       const pw = prompt(`Nueva contraseña para ${name} (mínimo 10 caracteres). Cierra sus sesiones abiertas:`, genPassword());
       if (pw && await call('PUT', { id, password: pw })) alert(`Contraseña de ${name} actualizada. Compártela por un canal privado.`);
     }
+    if (b.dataset.act === 'user-toggle') {
+      const disabling = b.dataset.disabled === '1';
+      if (!disabling || confirm(`¿Desactivar la cuenta de ${name}? No podrá entrar aunque use su cuenta de Google.`)) {
+        if (await call('PUT', { id, disabled: disabling })) viewUsuarios();
+      }
+    }
     if (b.dataset.act === 'user-del' && confirm(`¿Eliminar la cuenta de ${name}? Ya no podrá entrar. Sus tareas y su historial se conservan.`)) {
       if (await call('DELETE', { id })) viewUsuarios();
     }
@@ -388,7 +426,7 @@ async function viewUsuarios() {
     const res = await api('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const out = await res.json().catch(() => ({}));
     if (!res.ok) { const er = $('#userErr'); er.textContent = out.error; er.hidden = false; return; }
-    alert(`Usuario creado.\n\nCorreo: ${body.email}\nContraseña inicial: ${body.password}\n\nCompártela por un canal privado.`);
+    alert(authMode === 'google' ? `Usuario dado de alta. ${body.email} ya puede entrar con su cuenta de Google.` : `Usuario creado.\n\nCorreo: ${body.email}\nContraseña inicial: ${body.password}\n\nCompártela por un canal privado.`);
     viewUsuarios();
   };
 }

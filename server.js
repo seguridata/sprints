@@ -15,6 +15,8 @@ import {
   isAdmin, publicUser, viewFor, mergeFromUser,
 } from './lib/auth.js';
 import { uid } from './lib/scheduler.js';
+import { googleEnabled, allowedDomain, startUrl, finishLogin, adminEmails, STATE_COOKIE } from './lib/google.js';
+import { parseCookies } from './lib/auth.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3210;
@@ -84,20 +86,72 @@ function setupCodeOk(code) {
   return crypto.timingSafeEqual(a, b);
 }
 
+function redirectWithCookies(res, location, cookies) {
+  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store', 'Set-Cookie': cookies });
+  res.end();
+}
+const stateCookie = (value, req) => {
+  const secure = req.headers['x-forwarded-proto'] === 'https' || process.env.VERCEL ? '; Secure' : '';
+  return `${STATE_COOKIE}=${value || ''}; Path=/api/auth; HttpOnly; SameSite=Lax; Max-Age=${value ? 600 : 0}${secure}`;
+};
+
+// Regreso de Google: valida el estado, el dominio y crea o actualiza la cuenta.
+// Si la cuenta no existía se crea como miembro; los correos de ADMIN_EMAILS (o la primera
+// persona, si aún no hay administradores) quedan como administradores.
+async function googleCallback(req, res, q, db) {
+  const fail = (msg) => redirectWithCookies(res, `/?login_error=${encodeURIComponent(msg)}`, [stateCookie(null, req)]);
+  if (q.get('error')) return fail(q.get('error') === 'access_denied' ? 'Cancelaste el inicio de sesión.' : `Google respondió: ${q.get('error')}`);
+  const expected = parseCookies(req.headers.cookie)[STATE_COOKIE];
+  if (!expected || expected !== q.get('state')) return fail('La sesión de inicio expiró. Intenta de nuevo.');
+  let g;
+  try { g = await finishLogin(req, q.get('code')); } catch (err) { return fail(err.message); }
+  db.users ||= [];
+  let u = db.users.find((x) => x.email === g.email);
+  const noAdmins = !db.users.some((x) => x.role === 'admin' && !x.disabled);
+  const shouldBeAdmin = adminEmails().includes(g.email) || noAdmins;
+  if (!u) {
+    u = { id: uid('u'), email: g.email, name: g.name, role: shouldBeAdmin ? 'admin' : 'miembro', memberId: '', sessionVersion: 0, createdAt: serverNow(), provider: 'google' };
+    db.users.push(u);
+    db.activity = appendActivity(db.activity, [{ id: uid('a'), at: serverNow(), author: g.name, projectId: null, projectName: null, text: `entró por primera vez (${u.role === 'admin' ? 'administrador' : 'miembro'})` }]);
+  } else {
+    if (u.disabled) return fail('Tu cuenta está desactivada. Habla con un administrador.');
+    if (adminEmails().includes(g.email)) u.role = 'admin';
+    if (!u.name || u.name === u.email) u.name = g.name;
+  }
+  u.picture = g.picture;
+  u.lastLogin = serverNow();
+  await saveDb(db);
+  return redirectWithCookies(res, '/', [sessionCookie(createSessionToken(u), req), stateCookie(null, req)]);
+}
+
 function sendWithCookie(res, code, body, cookie) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': cookie });
   res.end(JSON.stringify(body));
 }
 
 // Rutas /api/auth: consultar sesión, primer administrador, entrar, salir y cambiar contraseña
-async function handleAuth(req, res) {
+async function handleAuth(req, res, url) {
   const db = await loadDb();
   const users = db.users || [];
+  const google = googleEnabled();
   if (req.method === 'GET') {
+    const q = url.searchParams;
+    if (google && q.get('action') === 'google') {
+      const { url: to, state } = startUrl(req);
+      return redirectWithCookies(res, to, [stateCookie(state, req)]);
+    }
+    if (google && (q.get('code') || q.get('error'))) return googleCallback(req, res, q, db);
     const u = userFromRequest(req, db);
-    return send(res, 200, { user: publicUser(u), needsSetup: users.length === 0, setupNeedsCode: Boolean(process.env.SETUP_CODE || process.env.APP_PASSWORD || process.env.VERCEL) });
+    return send(res, 200, {
+      user: publicUser(u), mode: google ? 'google' : 'password', domain: allowedDomain(),
+      needsSetup: !google && users.length === 0, setupNeedsCode: Boolean(process.env.SETUP_CODE || process.env.APP_PASSWORD || process.env.VERCEL),
+    });
   }
   const body = await readBody(req);
+  // Con Google activado, solo se entra con la cuenta de la empresa (sin contraseñas locales)
+  if (google && ['setup', 'login', 'password'].includes(body.action)) {
+    return send(res, 400, { error: `El acceso es con tu cuenta de Google @${allowedDomain()}.` });
+  }
   switch (body.action) {
     case 'setup': {
       if (users.length) return send(res, 409, { error: 'Ya existe un administrador. Inicia sesión.' });
@@ -153,9 +207,14 @@ async function handleUsers(req, res, me, db) {
     const name = clean(body.name, 60);
     if (!email.includes('@') || !name) return send(res, 400, { error: 'Escribe nombre y correo.' });
     if (users.some((x) => x.email === email)) return send(res, 409, { error: 'Ya existe un usuario con ese correo.' });
-    const problem = passwordProblem(body.password);
-    if (problem) return send(res, 400, { error: problem });
-    users.push({ id: uid('u'), email, name, role: body.role === 'admin' ? 'admin' : 'miembro', memberId: memberOk(body.memberId), passwordHash: hashPassword(body.password), sessionVersion: 0, createdAt: serverNow() });
+    const google = googleEnabled();
+    if (google && !email.endsWith(`@${allowedDomain()}`)) return send(res, 400, { error: `Solo se pueden dar de alta correos @${allowedDomain()}.` });
+    if (!google) {
+      const problem = passwordProblem(body.password);
+      if (problem) return send(res, 400, { error: problem });
+    }
+    // En modo Google se da de alta "por adelantado": entra con su cuenta y hereda rol y persona
+    users.push({ id: uid('u'), email, name, role: body.role === 'admin' ? 'admin' : 'miembro', memberId: memberOk(body.memberId), ...(google ? { provider: 'google' } : { passwordHash: hashPassword(body.password) }), sessionVersion: 0, createdAt: serverNow() });
     db.users = users;
     return save(`creó la cuenta de ${name}`);
   }
@@ -167,13 +226,19 @@ async function handleUsers(req, res, me, db) {
     if (body.name) u.name = clean(body.name, 60);
     if (body.role) u.role = body.role === 'admin' ? 'admin' : 'miembro';
     if (body.memberId !== undefined) u.memberId = memberOk(body.memberId);
+    if (body.disabled !== undefined) {
+      if (u.id === me.id) return send(res, 400, { error: 'No puedes desactivar tu propia cuenta.' });
+      if (body.disabled && u.role === 'admin' && admins.length === 1) return send(res, 400, { error: 'Debe quedar al menos un administrador.' });
+      u.disabled = Boolean(body.disabled);
+      u.sessionVersion = (u.sessionVersion || 0) + 1; // cierra su sesión
+    }
     if (body.password) {
       const problem = passwordProblem(body.password);
       if (problem) return send(res, 400, { error: problem });
       u.passwordHash = hashPassword(body.password);
       u.sessionVersion = (u.sessionVersion || 0) + 1;
     }
-    return save(body.password ? `restableció la contraseña de ${u.name}` : `actualizó la cuenta de ${u.name}`);
+    return save(body.password ? `restableció la contraseña de ${u.name}` : body.disabled !== undefined ? `${u.disabled ? 'desactivó' : 'reactivó'} la cuenta de ${u.name}` : `actualizó la cuenta de ${u.name}`);
   }
   if (req.method === 'DELETE') {
     if (u.id === me.id) return send(res, 400, { error: 'No puedes borrar tu propia cuenta.' });
@@ -188,7 +253,7 @@ async function handleUsers(req, res, me, db) {
 export async function handler(req, res) {
   const url = new URL(req.url, 'http://x');
   try {
-    if (url.pathname === '/api/auth') return await handleAuth(req, res);
+    if (url.pathname === '/api/auth') return await handleAuth(req, res, url);
     if (url.pathname.startsWith('/api/')) {
       const db = await loadDb();
       const me = userFromRequest(req, db);
@@ -197,7 +262,7 @@ export async function handler(req, res) {
       if (url.pathname === '/api/users') return await handleUsers(req, res, me, db);
 
       if (url.pathname === '/api/state' && req.method === 'GET') {
-        return send(res, 200, { db: viewFor(db, me), me: publicUser(me), now: serverNow(), providers: providersInfo(), storage: storageKind() });
+        return send(res, 200, { db: viewFor(db, me), me: publicUser(me), auth: { mode: googleEnabled() ? 'google' : 'password', domain: allowedDomain() }, now: serverNow(), providers: providersInfo(), storage: storageKind() });
       }
       if (url.pathname === '/api/state' && req.method === 'PUT') {
         const body = await readBody(req);

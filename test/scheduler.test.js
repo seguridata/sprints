@@ -147,3 +147,29 @@ test('cuentas: contraseñas, sesiones y permisos por rol', async () => {
   const cartera = runTool('consultar_cartera', {}, { db: full, user: ana });
   assert.deepEqual(cartera.proyectos.map((p) => p.id), ['equipo', 'mio']);
 });
+
+test('Google: solo acepta cuentas verificadas del dominio de la empresa', async () => {
+  process.env.GOOGLE_CLIENT_ID = 'cliente-prueba';
+  process.env.GOOGLE_CLIENT_SECRET = 'secreto';
+  process.env.ALLOWED_DOMAIN = 'seguridata.com';
+  const G = await import('../lib/google.js');
+  const req = { headers: { host: 'localhost:3210' } };
+  const { url, state } = G.startUrl(req);
+  assert.ok(url.startsWith('https://accounts.google.com/') && url.includes('hd=seguridata.com') && url.includes(`state=${state}`));
+  assert.ok(url.includes(encodeURIComponent('http://localhost:3210/api/auth')));
+
+  const realFetch = globalThis.fetch;
+  const token = (claims) => `x.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.y`;
+  const base = { iss: 'https://accounts.google.com', aud: 'cliente-prueba', exp: Date.now() / 1000 + 300, email_verified: true };
+  const tryClaims = async (claims) => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ id_token: token({ ...base, ...claims }) }) });
+    try { return await G.finishLogin(req, 'codigo'); } finally { globalThis.fetch = realFetch; }
+  };
+  const ok = await tryClaims({ email: 'Ana@SeguriData.com', hd: 'seguridata.com', name: 'Ana' });
+  assert.equal(ok.email, 'ana@seguridata.com');
+  await assert.rejects(tryClaims({ email: 'ana@gmail.com' }), /Solo se permiten cuentas @seguridata.com/);
+  await assert.rejects(tryClaims({ email: 'ana@seguridata.com.mx', hd: 'seguridata.com.mx' }), /Solo se permiten/);
+  await assert.rejects(tryClaims({ email: 'ana@seguridata.com', hd: 'seguridata.com', aud: 'otra-app' }), /no es para esta aplicación/);
+  await assert.rejects(tryClaims({ email: 'ana@seguridata.com', hd: 'seguridata.com', email_verified: false }), /no está verificado/);
+  delete process.env.GOOGLE_CLIENT_ID; delete process.env.GOOGLE_CLIENT_SECRET;
+});

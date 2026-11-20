@@ -17,6 +17,24 @@ Herramienta local para planificar proyectos por sprints. Le platicas cada proyec
 
 ## Cuentas y permisos
 
+### Acceso con Google (cuentas @seguridata.com)
+
+Si están configuradas `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET`, la app muestra **"Entrar con Google"** y solo acepta cuentas verificadas del dominio `ALLOWED_DOMAIN` (por defecto `seguridata.com`). El servidor valida el dominio aunque se intente con otra cuenta, y las contraseñas locales se desactivan.
+
+- La primera vez que alguien entra se crea su cuenta como **miembro**: solo ve los proyectos "de todo el equipo" hasta que un administrador lo ligue con su persona del Equipo o lo asigne a proyectos.
+- Los correos de `ADMIN_EMAILS` entran siempre como **administradores**. Si no está configurada, la primera persona que entra queda como administradora.
+- Un administrador puede **dar de alta por adelantado** un correo (con rol y persona) y **desactivar** cuentas para impedirles la entrada.
+
+**Configurar Google (una sola vez, la hace quien administre Google Workspace o Google Cloud):**
+1. En https://console.cloud.google.com crea un proyecto (por ejemplo "Agente de Sprints").
+2. **APIs y servicios → Pantalla de consentimiento de OAuth:** tipo de usuario **Interno**, para que solo la organización pueda usarla. Llena nombre de la app y correo de soporte.
+3. **APIs y servicios → Credenciales → Crear credenciales → ID de cliente de OAuth**, tipo **Aplicación web**.
+4. En **URIs de redireccionamiento autorizados** agrega:
+   - `https://TU-DOMINIO-DE-VERCEL/api/auth`
+   - `http://localhost:3210/api/auth` (para probar en local)
+5. Copia el **ID de cliente** y el **secreto** a `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET`, en Vercel o en `.env`.
+
+
 Cada persona entra con **su correo y su contraseña**. Las contraseñas se guardan cifradas (scrypt) y la sesión dura 7 días en una cookie firmada.
 
 **Primer arranque:** la primera persona que abre la app crea la cuenta de **administrador**. En Vercel se pide un **código de instalación** (`SETUP_CODE`, o `APP_PASSWORD` si ya existía), para que nadie más pueda adelantarse.
@@ -108,7 +126,9 @@ El proyecto ya está preparado: la interfaz se sirve como sitio estático y `/ap
 | Variable | Para qué |
 |---|---|
 | `SESSION_SECRET` | **Obligatoria.** Firma las sesiones. Genera un valor aleatorio largo (ver `.env.example`). |
-| `SETUP_CODE` (o `APP_PASSWORD`) | **Obligatoria.** Código para crear la primera cuenta de administrador. |
+| `GOOGLE_CLIENT_ID` y `GOOGLE_CLIENT_SECRET` | Acceso con Google, solo @seguridata.com (recomendado). |
+| `ADMIN_EMAILS` | Correos que entran como administradores, separados por comas. |
+| `SETUP_CODE` (o `APP_PASSWORD`) | Solo sin Google: código para crear la primera cuenta de administrador. |
 | `ANTHROPIC_API_KEY` y/o `OPENAI_API_KEY` | Llaves del servidor (opcionales si cada usuario usa la suya). |
 | `ANTHROPIC_WORKSPACE_ID` | Solo si la llave de Claude empieza con `sk-ant-usr-`. |
 | `APP_TIMEZONE` | Opcional; por defecto `America/Mexico_City` (los servidores de Vercel usan UTC). |

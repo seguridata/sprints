@@ -201,3 +201,6 @@ label.field input, label.field select, label.field textarea { font: inherit; fon
 body.member .admin-only { display: none !important; }
 
 [hidden] { display: none !important; }
+
+/* Antes de iniciar sesión no se muestra el menú */
+body:not(.ready) .sidebar nav, body:not(.ready) #btnNewProject, body:not(.ready) .side-title { visibility: hidden; }
