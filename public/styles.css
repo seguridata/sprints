@@ -204,3 +204,25 @@ body.member .admin-only { display: none !important; }
 
 /* Antes de iniciar sesión no se muestra el menú */
 body:not(.ready) .sidebar nav, body:not(.ready) #btnNewProject, body:not(.ready) .side-title { visibility: hidden; }
+
+/* Pantalla de inicio de sesión (página completa, estilo de las apps internas de SeguriData) */
+body.logged-out .app { display: none; }
+.login-screen { position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto;
+  background: radial-gradient(1200px 600px at 85% 15%, #eef6e1 0%, transparent 60%), #f5f6f2; }
+.login-card { width: min(548px, 100%); background: #ffffff; border-radius: 10px; border-top: 5px solid var(--brand-green);
+  box-shadow: 0 10px 40px rgba(40, 60, 20, .08), 0 1px 3px rgba(0, 0, 0, .06); padding: 44px 48px 36px; text-align: center; color: #1f2328; }
+.login-logo { width: 280px; max-width: 80%; height: auto; display: block; margin: 0 auto 26px; }
+.login-card h1 { font-size: 28px; margin: 0 0 10px; color: #1f2328; letter-spacing: -.01em; }
+.login-sub { color: #5f6a72; font-size: 17px; line-height: 1.5; margin: 0 auto 28px; max-width: 440px; }
+.login-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; background: #4f7d14; color: #fff; border: 0; border-radius: 6px;
+  padding: 14px 26px; font: inherit; font-size: 18px; text-decoration: none; cursor: pointer; transition: background .15s; }
+.login-btn:hover { background: #5f8f1a; }
+.login-btn:disabled { opacity: .6; cursor: default; }
+.login-btn svg { background: #fff; border-radius: 50%; padding: 3px; box-sizing: content-box; }
+.login-foot { color: #5f6a72; font-size: 14px; margin: 26px 0 0; }
+.login-error { background: #fbe4e4; color: #b42318; border-radius: 6px; padding: 8px 12px; font-size: 14px; margin: 0 0 16px; }
+.login-note { color: #5f6a72; font-size: 14px; margin: 0; }
+.login-form { display: grid; gap: 12px; text-align: left; }
+.login-form .login-btn { justify-self: stretch; margin-top: 6px; }
+.login-form label.field input { background: #fff; color: #1f2328; border-color: #d0d4cc; }
+@media (max-width: 520px) { .login-card { padding: 32px 22px 26px; } .login-card h1 { font-size: 24px; } .login-sub { font-size: 15px; } }

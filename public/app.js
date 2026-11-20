@@ -56,64 +56,74 @@ async function api(url, opts = {}) {
 
 const postAuth = (body) => fetch('/api/auth', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
-// Pantalla de acceso: crea el primer administrador o inicia sesión. No se puede cerrar.
+// Pantalla de inicio de sesión a página completa (la app no se muestra detrás).
+// Con Google: solo el botón "Iniciar sesión con Google". Sin Google: formulario de respaldo.
+const GOOGLE_ICON = '<svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+
+function loginCard(inner) {
+  const screen = $('#loginScreen');
+  screen.innerHTML = `<main class="login-card">
+      <img class="login-logo" src="/logo-seguridata.webp" alt="SeguriData — Information Security">
+      <h1>Agente de Sprints</h1>
+      <p class="login-sub">Planifica tus proyectos por sprints con IA: tiempos con el horario real del equipo, Gantt, tablero y burndown.</p>
+      ${inner}
+    </main>`;
+  screen.hidden = false;
+  document.body.classList.add('logged-out');
+  return screen;
+}
+function hideLoginScreen() {
+  $('#loginScreen').hidden = true;
+  $('#loginScreen').innerHTML = '';
+  document.body.classList.remove('logged-out');
+}
+
 async function showLogin() {
   const info = await (await fetch('/api/auth', { credentials: 'same-origin' })).json();
-  if (info.user) return;
+  if (info.user) { hideLoginScreen(); return; }
   authMode = info.mode || 'password';
   authDomain = info.domain || authDomain;
   // Error devuelto por el regreso de Google (?login_error=...)
   const params = new URLSearchParams(location.search);
   const loginError = params.get('login_error');
   if (loginError) history.replaceState(null, '', location.pathname);
+  const errorHtml = (msg) => `<p class="login-error" id="authError" ${msg ? '' : 'hidden'}>${esc(msg || '')}</p>`;
+
   if (authMode === 'google') {
-    return new Promise(() => {
-      openModal('Iniciar sesión', `
-        <div class="grid" style="text-align:center;padding:8px 0 4px">
-          <img src="/logo-seguridata.webp" alt="SeguriData" style="width:220px;margin:0 auto;background:#fff;border-radius:8px;padding:6px 8px">
-          <p>Entra con tu cuenta de Google de la empresa.</p>
-          ${loginError ? `<p class="pill bad" style="justify-content:center">${esc(loginError)}</p>` : ''}
-          <a class="btn primary" href="/api/auth?action=google" style="justify-content:center;padding:10px 16px;text-decoration:none">
-            <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
-            Entrar con Google
-          </a>
-          <p class="muted small">Solo se aceptan cuentas <strong>@${esc(authDomain)}</strong>.</p>
-        </div>`, null, { locked: true });
-    });
+    loginCard(`
+      ${errorHtml(loginError)}
+      <a class="login-btn" href="/api/auth?action=google">${GOOGLE_ICON}<span>Iniciar sesión con Google</span></a>
+      <p class="login-foot">Uso interno. Inicia sesión con tu cuenta @${esc(authDomain)}.</p>`);
+    return new Promise(() => {}); // el navegador sale hacia Google; al volver se recarga la página
   }
+
+  // Respaldo sin Google: crear el primer administrador o entrar con correo y contraseña
+  const setup = info.needsSetup;
   return new Promise((resolve) => {
-    const setup = info.needsSetup;
-    openModal(setup ? 'Crear la cuenta de administrador' : 'Iniciar sesión', setup ? `
-      <form id="authForm" class="grid">
-        <p class="muted small">Es la primera vez que se usa esta instalación. La cuenta que crees será de <strong>administrador</strong>: podrá dar de alta a las demás personas.</p>
-        ${info.setupNeedsCode ? '<label class="field">Código de instalación<input name="code" type="password" required autocomplete="off"><span class="muted small">Es el valor de la variable SETUP_CODE (o APP_PASSWORD) configurada en el servidor.</span></label>' : ''}
-        <div class="form-grid">
-          <label class="field">Nombre<input name="name" required maxlength="60" autocomplete="name"></label>
-          <label class="field">Correo<input name="email" type="email" required autocomplete="email"></label>
-        </div>
-        <label class="field">Contraseña (mínimo 10 caracteres)<input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
-        <p class="pill bad" id="authError" hidden></p>
-        <div class="row"><span class="spacer"></span><button class="btn primary" type="submit">Crear cuenta y entrar</button></div>
-      </form>` : `
-      <form id="authForm" class="grid">
-        <label class="field">Correo<input name="email" type="email" required autocomplete="username" autofocus></label>
-        <label class="field">Contraseña<input name="password" type="password" required autocomplete="current-password"></label>
-        <p class="pill bad" id="authError" hidden></p>
-        <div class="row"><span class="muted small">¿Olvidaste tu contraseña? Pídele a un administrador que la restablezca.</span><span class="spacer"></span><button class="btn primary" type="submit">Entrar</button></div>
-      </form>`, (el) => {
-      $('#authForm', el).onsubmit = async (e) => {
-        e.preventDefault();
-        const f = Object.fromEntries(new FormData(e.target));
-        const btn = e.target.querySelector('button[type=submit]');
-        btn.disabled = true;
-        const r = await postAuth({ action: setup ? 'setup' : 'login', ...f });
-        const j = await r.json().catch(() => ({}));
-        btn.disabled = false;
-        if (!r.ok) { const er = $('#authError', el); er.textContent = j.error || 'No se pudo entrar'; er.hidden = false; return; }
-        closeModal(true);
-        resolve();
-      };
-    }, { locked: true });
+    const screen = loginCard(`
+      <form id="authForm" class="login-form">
+        ${setup ? `<p class="login-note">Primera vez: la cuenta que crees será de <strong>administrador</strong>.</p>
+          ${info.setupNeedsCode ? '<label class="field">Código de instalación<input name="code" type="password" required autocomplete="off"></label>' : ''}
+          <label class="field">Nombre<input name="name" required maxlength="60" autocomplete="name"></label>` : ''}
+        <label class="field">Correo<input name="email" type="email" required autocomplete="${setup ? 'email' : 'username'}"></label>
+        <label class="field">Contraseña${setup ? ' (mínimo 10 caracteres)' : ''}<input name="password" type="password" required ${setup ? 'minlength="10" autocomplete="new-password"' : 'autocomplete="current-password"'}></label>
+        ${errorHtml(loginError)}
+        <button class="login-btn" type="submit"><span>${setup ? 'Crear cuenta y entrar' : 'Iniciar sesión'}</span></button>
+      </form>
+      <p class="login-foot">${setup ? 'Uso interno de SeguriData.' : '¿Olvidaste tu contraseña? Pídele a un administrador que la restablezca.'}</p>`);
+    screen.querySelector('input')?.focus();
+    $('#authForm', screen).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true;
+      const r = await postAuth({ action: setup ? 'setup' : 'login', ...f });
+      const j = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      if (!r.ok) { const er = $('#authError', screen); er.textContent = j.error || 'No se pudo entrar'; er.hidden = false; return; }
+      hideLoginScreen();
+      resolve();
+    };
   });
 }
 
