@@ -1,0 +1,18 @@
+{
+  "name": "agente-sprints",
+  "version": "1.0.0",
+  "description": "Agente de planificación por sprints con Gantt, tablero y burndown",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
+    "openai": "^6.49.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

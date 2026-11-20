@@ -1,0 +1,8 @@
+# Nunca subir llaves ni datos locales
+.env
+.env.*
+!.env.example
+data/
+node_modules/
+test/
+.claude/

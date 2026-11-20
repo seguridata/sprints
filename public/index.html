@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agente de Sprints · SeguriData</title>
+  <link rel="icon" href="/logo-seguridata.webp" type="image/webp" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo"><img src="/logo-seguridata.webp" alt="SeguriData — Information Security" /></div>
+        <div class="brand-app">Agente de Sprints</div>
+      </div>
+      <button class="btn primary block" id="btnNewProject">+ Nuevo proyecto</button>
+      <div class="side-title">Proyectos</div>
+      <nav id="projectList"></nav>
+      <div class="side-title">General</div>
+      <nav>
+        <a href="#" data-view="cartera" class="navlink">Cartera y carga del equipo</a>
+        <a href="#" data-view="equipo" class="navlink">Equipo</a>
+        <a href="#" data-view="plantillas" class="navlink">Plantillas</a>
+        <a href="#" data-view="config" class="navlink">Calendario y configuración</a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">—</h1>
+          <div class="muted" id="pageSubtitle"></div>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn" id="btnToggleChat">Agente</button>
+        </div>
+      </header>
+      <div id="storageBanner"></div>
+      <div class="tabs" id="tabs"></div>
+      <section id="view" class="view"></section>
+    </main>
+
+    <aside class="chat" id="chatPanel">
+      <div class="chat-head">
+        <strong>Agente</strong>
+        <span class="muted small" id="chatStatus" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0"></span>
+        <button class="btn ghost small" id="btnAiSettings" title="Proveedor, modelo y API key">Ajustes</button>
+        <button class="btn ghost small" style="margin-left:0" id="btnClearChat" title="Nueva conversación">Limpiar</button>
+      </div>
+      <div class="chat-log" id="chatLog"></div>
+      <form class="chat-form" id="chatForm">
+        <div id="attachments" class="attachments"></div>
+        <textarea id="chatInput" rows="3" placeholder="Platícale el proyecto: alcance, equipo, fecha de inicio… o pega una minuta. Enter envía, Shift+Enter salto de línea."></textarea>
+        <div class="chat-actions">
+          <label class="btn ghost small" title="Adjuntar PDF, texto, CSV, Markdown o imagen">
+            Adjuntar<input type="file" id="fileInput" multiple accept=".pdf,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.webp,.gif" hidden />
+          </label>
+          <button class="btn primary small" type="submit" id="btnSend">Enviar</button>
+        </div>
+      </form>
+    </aside>
+  </div>
+
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head"><h2 id="modalTitle"></h2><button class="btn ghost small" id="modalClose">Cerrar</button></div>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+  <div class="tooltip" id="tooltip" hidden></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
