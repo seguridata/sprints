@@ -143,7 +143,7 @@ async function handleAuth(req, res, url) {
     if (google && (q.get('code') || q.get('error'))) return googleCallback(req, res, q, db);
     const u = userFromRequest(req, db);
     return send(res, 200, {
-      user: publicUser(u), mode: google ? 'google' : 'password', domain: allowedDomain(),
+      user: publicUser(u), mode: google ? 'google' : 'password', domain: allowedDomain(), storage: storageKind(),
       needsSetup: !google && users.length === 0, setupNeedsCode: Boolean(process.env.SETUP_CODE || process.env.APP_PASSWORD || process.env.VERCEL),
     });
   }

@@ -45,13 +45,24 @@ const statusLabel = (id) => S.STATUSES.find((s) => s.id === id)?.label || id;
 
 // ================= datos =================
 // Llamadas al servidor: la sesión viaja en una cookie. Si expira, se pide iniciar sesión de nuevo.
-async function api(url, opts = {}) {
+async function api(url, opts = {}, retried = false) {
   const r = await fetch(url, { ...opts, credentials: 'same-origin' });
   if (r.status === 401 && url !== '/api/auth') {
+    // Si ya se reintentó y el servidor sigue sin reconocer la sesión, no se insiste (evita un bucle)
+    if (retried) { showServerProblem(); throw new Error('Sesión no reconocida por el servidor'); }
     await showLogin();
-    return api(url, opts);
+    return api(url, opts, true);
   }
   return r;
+}
+
+// La sesión existe para /api/auth pero no para el resto: en Vercel pasa cuando no hay base de datos
+// (cada función guarda sus datos en un disco temporal distinto).
+function showServerProblem() {
+  loginCard(`
+    <p class="login-error">El servidor no pudo leer tu sesión.</p>
+    <p class="login-sub" style="font-size:15px;margin-bottom:18px">Lo más probable es que falte conectar la base de datos. En Vercel: <strong>Storage → Upstash for Redis</strong>, conectarla al proyecto y hacer <strong>Redeploy</strong>.</p>
+    <a class="login-btn" href="#" onclick="fetch('/api/auth',{method:'POST',headers:{'Content-Type':'application/json'},body:'{&quot;action&quot;:&quot;logout&quot;}'}).then(()=>location.reload());return false;"><span>Cerrar sesión y reintentar</span></a>`);
 }
 
 const postAuth = (body) => fetch('/api/auth', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -87,11 +98,14 @@ async function showLogin() {
   const params = new URLSearchParams(location.search);
   const loginError = params.get('login_error');
   if (loginError) history.replaceState(null, '', location.pathname);
+  const storageHtml = info.storage === 'temporal'
+    ? '<p class="login-error">Aviso para el administrador: la base de datos (Redis) no está conectada en Vercel, así que el inicio de sesión no funcionará. Conéctala en Storage → Upstash for Redis y haz Redeploy.</p>'
+    : '';
   const errorHtml = (msg) => `<p class="login-error" id="authError" ${msg ? '' : 'hidden'}>${esc(msg || '')}</p>`;
 
   if (authMode === 'google') {
     loginCard(`
-      ${errorHtml(loginError)}
+      ${storageHtml}${errorHtml(loginError)}
       <a class="login-btn" href="/api/auth?action=google">${GOOGLE_ICON}<span>Iniciar sesión con Google</span></a>
       <p class="login-foot">Uso interno. Inicia sesión con tu cuenta @${esc(authDomain)}.</p>`);
     return new Promise(() => {}); // el navegador sale hacia Google; al volver se recarga la página
@@ -246,7 +260,7 @@ function storageWarning() {
 }
 
 function renderSidebar() {
-  $('#profileChip').innerHTML = `<span class="dot" style="background:${profile.id ? memberColor(profile.id) : 'var(--muted)'}"></span><span class="profile-name" title="${esc(me.email)}">${esc(me.name)} <span class="muted small">· ${isAdmin() ? 'Admin' : 'Miembro'}</span></span><a href="#" data-act="profile">Mi cuenta</a>`;
+  $('#profileChip').innerHTML = `<span class="dot" style="background:${profile.id ? memberColor(profile.id) : 'var(--muted)'}"></span><span class="profile-name" title="${esc(me.email)}">${esc(me.name)} <span class="muted small">· ${isAdmin() ? 'Admin' : 'Miembro'}</span></span><a href="#" data-act="profile" title="Cambiar contraseña o cerrar sesión">Mi cuenta</a><a href="#" data-act="logout" title="Cerrar sesión">Salir</a>`;
   const mine = profile?.id ? myTasks().filter((x) => x.t.status !== 'done').length : 0;
   $('#myCount').textContent = mine ? String(mine) : '';
   $('#myCount').hidden = !mine;
@@ -1319,6 +1333,7 @@ document.addEventListener('click', (e) => {
     }
     case 'ai-settings': e.preventDefault(); openAiSettings(); break;
     case 'profile': e.preventDefault(); openAccountMenu(); break;
+    case 'logout': e.preventDefault(); postAuth({ action: 'logout' }).then(() => location.reload()); break;
     case 'ai-add': {
       const name = prompt('Nombre del tipo de trabajo (debe coincidir con el rol o la fase de las tareas):');
       if (name && db.settings.ai.factors[name.trim()] == null) { db.settings.ai.factors[name.trim()] = 0.7; commit(); }
