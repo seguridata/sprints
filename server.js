@@ -10,6 +10,11 @@ import OpenAI from 'openai';
 import { loadDb, saveDb, storageKind } from './lib/store.js';
 import { chat, PROVIDERS, serverKeys, serverNow } from './lib/agent.js';
 import { diffActivity, appendActivity } from './lib/activity.js';
+import {
+  hashPassword, verifyPassword, passwordProblem, createSessionToken, sessionCookie, userFromRequest,
+  isAdmin, publicUser, viewFor, mergeFromUser,
+} from './lib/auth.js';
+import { uid } from './lib/scheduler.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3210;
@@ -64,56 +69,162 @@ const providersInfo = () => {
   return Object.fromEntries(Object.entries(PROVIDERS).map(([id, p]) => [id, { label: p.label, defaultModel: p.defaultModel, serverKey: keys[id] }]));
 };
 
-// Contraseña de acceso opcional (APP_PASSWORD). Obligatoria en la práctica si la app es pública:
-// sin ella cualquiera con la URL podría ver los proyectos y gastar las API keys del servidor.
-function authorized(req) {
-  const expected = process.env.APP_PASSWORD;
-  if (!expected) return true;
-  const given = String(req.headers['x-app-password'] || '');
-  const a = crypto.createHash('sha256').update(given).digest();
+// ---------- cuentas y permisos ----------
+const clean = (v, max = 120) => String(v ?? '').trim().slice(0, max);
+const normEmail = (v) => clean(v, 200).toLowerCase();
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Código para crear el primer administrador: SETUP_CODE, o APP_PASSWORD si ya estaba configurada.
+// En Vercel es obligatorio, para que el primer visitante de la URL no pueda volverse administrador.
+function setupCodeOk(code) {
+  const expected = process.env.SETUP_CODE || process.env.APP_PASSWORD;
+  if (!expected) return !process.env.VERCEL;
+  const a = crypto.createHash('sha256').update(String(code || '')).digest();
   const b = crypto.createHash('sha256').update(expected).digest();
   return crypto.timingSafeEqual(a, b);
 }
 
-// Perfil ligero: el navegador indica quién está trabajando (no es autenticación, solo autoría)
-const authorFrom = (req) => {
-  try { return decodeURIComponent(String(req.headers['x-user-name'] || '')).trim().slice(0, 60) || 'Alguien'; } catch { return 'Alguien'; }
-};
+function sendWithCookie(res, code, body, cookie) {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Set-Cookie': cookie });
+  res.end(JSON.stringify(body));
+}
+
+// Rutas /api/auth: consultar sesión, primer administrador, entrar, salir y cambiar contraseña
+async function handleAuth(req, res) {
+  const db = await loadDb();
+  const users = db.users || [];
+  if (req.method === 'GET') {
+    const u = userFromRequest(req, db);
+    return send(res, 200, { user: publicUser(u), needsSetup: users.length === 0, setupNeedsCode: Boolean(process.env.SETUP_CODE || process.env.APP_PASSWORD || process.env.VERCEL) });
+  }
+  const body = await readBody(req);
+  switch (body.action) {
+    case 'setup': {
+      if (users.length) return send(res, 409, { error: 'Ya existe un administrador. Inicia sesión.' });
+      if (!setupCodeOk(body.code)) { await wait(600); return send(res, 403, { error: 'Código de instalación incorrecto.' }); }
+      const email = normEmail(body.email);
+      const name = clean(body.name, 60);
+      if (!email.includes('@') || !name) return send(res, 400, { error: 'Escribe nombre y correo.' });
+      const problem = passwordProblem(body.password);
+      if (problem) return send(res, 400, { error: problem });
+      const user = { id: uid('u'), email, name, role: 'admin', memberId: db.team.some((m) => m.id === body.memberId) ? body.memberId : '', passwordHash: hashPassword(body.password), sessionVersion: 0, createdAt: serverNow() };
+      db.users = [user];
+      db.activity = appendActivity(db.activity, [{ id: uid('a'), at: serverNow(), author: name, projectId: null, projectName: null, text: 'creó la cuenta de administrador' }]);
+      await saveDb(db);
+      return sendWithCookie(res, 200, { user: publicUser(user) }, sessionCookie(createSessionToken(user), req));
+    }
+    case 'login': {
+      const u = users.find((x) => x.email === normEmail(body.email) && !x.disabled);
+      if (!u || !verifyPassword(body.password, u.passwordHash)) { await wait(600); return send(res, 401, { error: 'Correo o contraseña incorrectos.' }); }
+      return sendWithCookie(res, 200, { user: publicUser(u) }, sessionCookie(createSessionToken(u), req));
+    }
+    case 'logout':
+      return sendWithCookie(res, 200, { ok: true }, sessionCookie(null, req));
+    case 'password': {
+      const u = userFromRequest(req, db);
+      if (!u) return send(res, 401, { error: 'Inicia sesión.', needsLogin: true });
+      if (!verifyPassword(body.current, u.passwordHash)) { await wait(600); return send(res, 403, { error: 'La contraseña actual no es correcta.' }); }
+      const problem = passwordProblem(body.next);
+      if (problem) return send(res, 400, { error: problem });
+      u.passwordHash = hashPassword(body.next);
+      u.sessionVersion = (u.sessionVersion || 0) + 1; // cierra las demás sesiones
+      await saveDb(db);
+      return sendWithCookie(res, 200, { ok: true }, sessionCookie(createSessionToken(u), req));
+    }
+    default:
+      return send(res, 400, { error: 'Acción desconocida' });
+  }
+}
+
+// Rutas /api/users: solo administradores
+async function handleUsers(req, res, me, db) {
+  if (!isAdmin(me)) return send(res, 403, { error: 'Solo un administrador puede gestionar usuarios.' });
+  const users = db.users || [];
+  const save = async (text) => {
+    db.activity = appendActivity(db.activity, [{ id: uid('a'), at: serverNow(), author: me.name, projectId: null, projectName: null, text }]);
+    await saveDb(db);
+    return send(res, 200, { users: users.map(publicUser) });
+  };
+  if (req.method === 'GET') return send(res, 200, { users: users.map(publicUser) });
+  const body = await readBody(req);
+  const memberOk = (id) => (db.team.some((m) => m.id === id) ? id : '');
+  if (req.method === 'POST') {
+    const email = normEmail(body.email);
+    const name = clean(body.name, 60);
+    if (!email.includes('@') || !name) return send(res, 400, { error: 'Escribe nombre y correo.' });
+    if (users.some((x) => x.email === email)) return send(res, 409, { error: 'Ya existe un usuario con ese correo.' });
+    const problem = passwordProblem(body.password);
+    if (problem) return send(res, 400, { error: problem });
+    users.push({ id: uid('u'), email, name, role: body.role === 'admin' ? 'admin' : 'miembro', memberId: memberOk(body.memberId), passwordHash: hashPassword(body.password), sessionVersion: 0, createdAt: serverNow() });
+    db.users = users;
+    return save(`creó la cuenta de ${name}`);
+  }
+  const u = users.find((x) => x.id === body.id);
+  if (!u) return send(res, 404, { error: 'Usuario no encontrado.' });
+  const admins = users.filter((x) => x.role === 'admin' && !x.disabled);
+  if (req.method === 'PUT') {
+    if (body.role && body.role !== 'admin' && u.role === 'admin' && admins.length === 1) return send(res, 400, { error: 'Debe quedar al menos un administrador.' });
+    if (body.name) u.name = clean(body.name, 60);
+    if (body.role) u.role = body.role === 'admin' ? 'admin' : 'miembro';
+    if (body.memberId !== undefined) u.memberId = memberOk(body.memberId);
+    if (body.password) {
+      const problem = passwordProblem(body.password);
+      if (problem) return send(res, 400, { error: problem });
+      u.passwordHash = hashPassword(body.password);
+      u.sessionVersion = (u.sessionVersion || 0) + 1;
+    }
+    return save(body.password ? `restableció la contraseña de ${u.name}` : `actualizó la cuenta de ${u.name}`);
+  }
+  if (req.method === 'DELETE') {
+    if (u.id === me.id) return send(res, 400, { error: 'No puedes borrar tu propia cuenta.' });
+    if (u.role === 'admin' && admins.length === 1) return send(res, 400, { error: 'Debe quedar al menos un administrador.' });
+    db.users = users.filter((x) => x !== u);
+    if (db.profilePrefs) delete db.profilePrefs[u.id];
+    return save(`eliminó la cuenta de ${u.name}`);
+  }
+  return send(res, 405, { error: 'Método no permitido' });
+}
 
 export async function handler(req, res) {
   const url = new URL(req.url, 'http://x');
   try {
-    if (url.pathname.startsWith('/api/') && !authorized(req)) {
-      return send(res, 401, { error: 'Contraseña incorrecta', needsPassword: true });
-    }
-    if (url.pathname === '/api/state' && req.method === 'GET') {
-      return send(res, 200, { db: await loadDb(), now: serverNow(), providers: providersInfo(), storage: storageKind() });
-    }
-    if (url.pathname === '/api/state' && req.method === 'PUT') {
-      const body = await readBody(req);
-      if (!body.db || !Array.isArray(body.db.projects)) return send(res, 400, { error: 'Formato inválido' });
-      // El historial de actividad lo escribe solo el servidor, a partir de las diferencias
-      const before = await loadDb();
-      const after = body.db;
-      after.activity = appendActivity(before.activity, diffActivity(before, after, authorFrom(req), serverNow()));
-      await saveDb(after);
-      return send(res, 200, { ok: true, activity: after.activity });
-    }
-    if (url.pathname === '/api/chat' && req.method === 'POST') {
-      const body = await readBody(req);
-      if (!body.text && !body.attachments?.length) return send(res, 400, { error: 'Mensaje vacío' });
-      try {
-        const out = await chat({
-          provider: body.provider, model: body.model, apiKey: body.apiKey || undefined,
-          history: Array.isArray(body.history) ? body.history : [], text: body.text || 'Analiza los archivos adjuntos.',
-          attachments: Array.isArray(body.attachments) ? body.attachments : [], projectId: body.projectId,
-          author: `${authorFrom(req)} (vía agente)`,
-        });
-        return send(res, 200, out);
-      } catch (err) {
-        if (err.code !== 'NO_KEY') console.error('[chat]', err.status || '', err.message);
-        return send(res, err.code === 'NO_KEY' ? 400 : 502, { error: describeApiError(err, body.provider) });
+    if (url.pathname === '/api/auth') return await handleAuth(req, res);
+    if (url.pathname.startsWith('/api/')) {
+      const db = await loadDb();
+      const me = userFromRequest(req, db);
+      if (!me) return send(res, 401, { error: 'Inicia sesión.', needsLogin: true, needsSetup: !(db.users || []).length });
+
+      if (url.pathname === '/api/users') return await handleUsers(req, res, me, db);
+
+      if (url.pathname === '/api/state' && req.method === 'GET') {
+        return send(res, 200, { db: viewFor(db, me), me: publicUser(me), now: serverNow(), providers: providersInfo(), storage: storageKind() });
       }
+      if (url.pathname === '/api/state' && req.method === 'PUT') {
+        const body = await readBody(req);
+        if (!body.db || !Array.isArray(body.db.projects)) return send(res, 400, { error: 'Formato inválido' });
+        // Se aplica solo lo que el rol permite; la actividad la escribe el servidor con el nombre de la sesión
+        const after = mergeFromUser(db, body.db, me);
+        after.activity = appendActivity(db.activity, diffActivity(db, after, me.name, serverNow()));
+        await saveDb(after);
+        return send(res, 200, { ok: true, activity: viewFor(after, me).activity });
+      }
+      if (url.pathname === '/api/chat' && req.method === 'POST') {
+        const body = await readBody(req);
+        if (!body.text && !body.attachments?.length) return send(res, 400, { error: 'Mensaje vacío' });
+        try {
+          const out = await chat({
+            provider: body.provider, model: body.model, apiKey: body.apiKey || undefined,
+            history: Array.isArray(body.history) ? body.history : [], text: body.text || 'Analiza los archivos adjuntos.',
+            attachments: Array.isArray(body.attachments) ? body.attachments : [], projectId: body.projectId,
+            user: me,
+          });
+          return send(res, 200, out);
+        } catch (err) {
+          if (err.code !== 'NO_KEY') console.error('[chat]', err.status || '', err.message);
+          return send(res, err.code === 'NO_KEY' ? 400 : 502, { error: describeApiError(err, body.provider) });
+        }
+      }
+      return send(res, 404, { error: 'Ruta no encontrada' });
     }
     if (req.method === 'GET') return serveStatic(req, res);
     send(res, 405, { error: 'Método no permitido' });
@@ -151,6 +262,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.log(`Agente de Sprints listo en http://localhost:${PORT}`);
     const keys = serverKeys();
     console.log(`API keys del servidor: Claude ${keys.anthropic ? 'sí' : 'no'} · ChatGPT ${keys.openai ? 'sí' : 'no'} (cada usuario también puede usar su propia llave desde el navegador)`);
-    console.log(`Datos: ${storageKind()}${process.env.APP_PASSWORD ? ' · con contraseña de acceso' : ''}`);
+    console.log(`Datos: ${storageKind()} · acceso con cuentas de usuario`);
   });
 }

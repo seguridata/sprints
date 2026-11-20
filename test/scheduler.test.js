@@ -92,3 +92,58 @@ test('registro de actividad describe cambios con autor', async () => {
   assert.equal(diffActivity(before, structuredClone(before), 'Ana', 'x').length, 0);
   assert.equal(appendActivity([{ id: 'old' }], e)[0].id, e[e.length - 1].id);
 });
+
+test('cuentas: contraseñas, sesiones y permisos por rol', async () => {
+  process.env.SESSION_SECRET = 'secreto-de-prueba';
+  const A = await import('../lib/auth.js');
+  const h = A.hashPassword('una-clave-larga');
+  assert.ok(A.verifyPassword('una-clave-larga', h));
+  assert.ok(!A.verifyPassword('otra', h));
+  assert.ok(A.passwordProblem('corta'));
+
+  const admin = { id: 'u1', name: 'Admin', role: 'admin', sessionVersion: 0 };
+  const ana = { id: 'u2', name: 'Ana', role: 'miembro', memberId: 'm1', sessionVersion: 0 };
+  const token = A.createSessionToken(ana);
+  assert.equal(A.readSessionToken(token).uid, 'u2');
+  assert.equal(A.readSessionToken(token.slice(0, -2) + 'xx'), null); // firma alterada
+
+  const db = {
+    users: [admin, ana], team: [{ id: 'm1', name: 'Ana' }, { id: 'm2', name: 'Beto' }], settings: {}, templates: [],
+    profilePrefs: { u1: { provider: 'openai' }, u2: { provider: 'anthropic' } },
+    activity: [{ projectId: 'secreto', text: 'x' }, { projectId: null, text: 'config' }, { projectId: 'equipo', text: 'y' }],
+    projects: [
+      { id: 'equipo', name: 'De todos', startDate: '2026-12-01', members: [], tasks: [{ id: 't1', title: 'A', status: 'todo' }] },
+      { id: 'mio', name: 'De Ana', startDate: '2026-12-01', members: ['m1'], tasks: [{ id: 't2', title: 'B', status: 'todo' }] },
+      { id: 'secreto', name: 'De Beto', startDate: '2026-12-01', members: ['m2'], tasks: [{ id: 't3', title: 'C', status: 'todo' }] },
+    ],
+  };
+  const v = A.viewFor(db, ana);
+  assert.deepEqual(v.projects.map((p) => p.id), ['equipo', 'mio']);
+  assert.equal(v.users, undefined);
+  assert.deepEqual(Object.keys(v.profilePrefs), ['u2']);
+  assert.deepEqual(v.activity.map((e) => e.text), ['y']);
+  assert.equal(A.viewFor(db, admin).projects.length, 3);
+
+  // Un miembro solo puede cambiar tareas de sus proyectos; lo demás se ignora
+  const fromAna = structuredClone(v);
+  fromAna.projects[1].tasks[0].status = 'done';
+  fromAna.projects[1].name = 'Renombrado';
+  fromAna.projects.push({ id: 'nuevo', name: 'No permitido', tasks: [] });
+  fromAna.team = [];
+  const merged = A.mergeFromUser(db, fromAna, ana);
+  assert.equal(merged.projects.find((p) => p.id === 'mio').tasks[0].status, 'done');
+  assert.equal(merged.projects.find((p) => p.id === 'mio').name, 'De Ana');
+  assert.ok(!merged.projects.some((p) => p.id === 'nuevo'));
+  assert.equal(merged.projects.find((p) => p.id === 'secreto').tasks.length, 1);
+  assert.equal(merged.team.length, 2);
+  assert.equal(merged.users.length, 2);
+  assert.equal(merged.profilePrefs.u1.provider, 'openai');
+
+  // El agente respeta los permisos
+  const { runTool } = await import('../lib/agent.js');
+  const full = { ...structuredClone(db), settings: (await import('../lib/scheduler.js')).defaultSettings() };
+  assert.throws(() => runTool('crear_proyecto', { nombre: 'X', fecha_inicio: '2026-12-01' }, { db: full, user: ana }), /Sin permiso/);
+  assert.throws(() => runTool('consultar_proyecto', { proyecto_id: 'secreto' }, { db: full, user: ana }), /No existe/);
+  const cartera = runTool('consultar_cartera', {}, { db: full, user: ana });
+  assert.deepEqual(cartera.proyectos.map((p) => p.id), ['equipo', 'mio']);
+});

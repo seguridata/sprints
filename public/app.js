@@ -17,17 +17,12 @@ const ui = {
   sending: false,
 };
 
-// Perfil ligero: quién está usando este navegador ({ id del equipo o null, name }).
-// No es autenticación: sirve para "Mis tareas", filtros y para firmar la actividad.
-let profile = safeJson(localGet('profile'));
-const profileKey = () => (profile ? profile.id || `n:${profile.name}` : 'anon');
-function setProfile(p) {
-  profile = p;
-  localSet('profile', JSON.stringify(p));
-  ui.boardMember = p?.id || '';
-  ui.chatState = loadChat(aiCfg().provider);
-  ui.chatError = null;
-}
+// Cuenta con la que se inició sesión (la valida el servidor con una cookie).
+// `profile.id` es la persona del Equipo ligada a la cuenta (para "Mis tareas"); puede ser null.
+let me = null;
+let profile = null;
+const profileKey = () => me?.id || 'anon';
+const isAdmin = () => me?.role === 'admin';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -47,38 +42,82 @@ const projectColor = (p) => `var(--s${(db.projects.indexOf(p) % 8) + 1})`;
 const statusLabel = (id) => S.STATUSES.find((s) => s.id === id)?.label || id;
 
 // ================= datos =================
-// Todas las llamadas al servidor llevan la contraseña de acceso (si el servidor la pide)
+// Llamadas al servidor: la sesión viaja en una cookie. Si expira, se pide iniciar sesión de nuevo.
 async function api(url, opts = {}) {
-  const headers = { ...(opts.headers || {}) };
-  const pass = sessionGet('appPassword');
-  if (pass) headers['x-app-password'] = pass;
-  if (profile?.name) headers['x-user-name'] = encodeURIComponent(profile.name);
-  const r = await fetch(url, { ...opts, headers });
-  if (r.status === 401) {
-    const ok = await askPassword(sessionGet('appPassword') ? 'Contraseña incorrecta, intenta de nuevo.' : '');
-    if (ok) return api(url, opts);
+  const r = await fetch(url, { ...opts, credentials: 'same-origin' });
+  if (r.status === 401 && url !== '/api/auth') {
+    await showLogin();
+    return api(url, opts);
   }
   return r;
 }
-function sessionGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
-function sessionSet(k, v) { try { sessionStorage.setItem(k, v); } catch { /* sin almacenamiento */ } }
 
-function askPassword(msg) {
+const postAuth = (body) => fetch('/api/auth', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+// Pantalla de acceso: crea el primer administrador o inicia sesión. No se puede cerrar.
+async function showLogin() {
+  const info = await (await fetch('/api/auth', { credentials: 'same-origin' })).json();
+  if (info.user) return;
   return new Promise((resolve) => {
-    openModal('Acceso', `
-      <form id="passForm" class="grid">
-        <p>Esta app está protegida. Escribe la contraseña que te compartieron.</p>
-        ${msg ? `<p class="pill bad">${esc(msg)}</p>` : ''}
-        <label class="field">Contraseña<input name="pass" type="password" autocomplete="current-password" required autofocus></label>
-        <div class="row"><span class="spacer"></span><button class="btn primary" type="submit">Entrar</button></div>
+    const setup = info.needsSetup;
+    openModal(setup ? 'Crear la cuenta de administrador' : 'Iniciar sesión', setup ? `
+      <form id="authForm" class="grid">
+        <p class="muted small">Es la primera vez que se usa esta instalación. La cuenta que crees será de <strong>administrador</strong>: podrá dar de alta a las demás personas.</p>
+        ${info.setupNeedsCode ? '<label class="field">Código de instalación<input name="code" type="password" required autocomplete="off"><span class="muted small">Es el valor de la variable SETUP_CODE (o APP_PASSWORD) configurada en el servidor.</span></label>' : ''}
+        <div class="form-grid">
+          <label class="field">Nombre<input name="name" required maxlength="60" autocomplete="name"></label>
+          <label class="field">Correo<input name="email" type="email" required autocomplete="email"></label>
+        </div>
+        <label class="field">Contraseña (mínimo 10 caracteres)<input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
+        <p class="pill bad" id="authError" hidden></p>
+        <div class="row"><span class="spacer"></span><button class="btn primary" type="submit">Crear cuenta y entrar</button></div>
+      </form>` : `
+      <form id="authForm" class="grid">
+        <label class="field">Correo<input name="email" type="email" required autocomplete="username" autofocus></label>
+        <label class="field">Contraseña<input name="password" type="password" required autocomplete="current-password"></label>
+        <p class="pill bad" id="authError" hidden></p>
+        <div class="row"><span class="muted small">¿Olvidaste tu contraseña? Pídele a un administrador que la restablezca.</span><span class="spacer"></span><button class="btn primary" type="submit">Entrar</button></div>
       </form>`, (el) => {
-      $('#passForm', el).onsubmit = (e) => {
+      $('#authForm', el).onsubmit = async (e) => {
         e.preventDefault();
-        sessionSet('appPassword', new FormData(e.target).get('pass'));
-        closeModal();
-        resolve(true);
+        const f = Object.fromEntries(new FormData(e.target));
+        const btn = e.target.querySelector('button[type=submit]');
+        btn.disabled = true;
+        const r = await postAuth({ action: setup ? 'setup' : 'login', ...f });
+        const j = await r.json().catch(() => ({}));
+        btn.disabled = false;
+        if (!r.ok) { const er = $('#authError', el); er.textContent = j.error || 'No se pudo entrar'; er.hidden = false; return; }
+        closeModal(true);
+        resolve();
       };
-    });
+    }, { locked: true });
+  });
+}
+
+function openAccountMenu() {
+  openModal('Mi cuenta', `
+    <p><strong>${esc(me.name)}</strong> · ${esc(me.email)} · <span class="pill ${isAdmin() ? 'good' : ''}">${isAdmin() ? 'Administrador' : 'Miembro'}</span></p>
+    <p class="muted small">${profile?.id ? `Ligada a <strong>${esc(memberName(profile.id))}</strong> del Equipo.` : 'Tu cuenta no está ligada a una persona del Equipo, así que no tienes "Mis tareas". Un administrador puede ligarla en Usuarios.'}</p>
+    <form id="pwForm" class="grid">
+      <h3>Cambiar contraseña</h3>
+      <div class="form-grid">
+        <label class="field">Contraseña actual<input name="current" type="password" required autocomplete="current-password"></label>
+        <label class="field">Nueva (mínimo 10 caracteres)<input name="next" type="password" required minlength="10" autocomplete="new-password"></label>
+      </div>
+      <p class="pill" id="pwMsg" hidden></p>
+      <div class="row"><button type="button" class="btn danger" id="logoutBtn">Cerrar sesión</button><span class="spacer"></span><button class="btn primary" type="submit">Cambiar contraseña</button></div>
+    </form>`, (el) => {
+    $('#logoutBtn', el).onclick = async () => { await postAuth({ action: 'logout' }); location.reload(); };
+    $('#pwForm', el).onsubmit = async (e) => {
+      e.preventDefault();
+      const r = await postAuth({ action: 'password', ...Object.fromEntries(new FormData(e.target)) });
+      const j = await r.json().catch(() => ({}));
+      const m = $('#pwMsg', el);
+      m.hidden = false;
+      m.className = `pill ${r.ok ? 'good' : 'bad'}`;
+      m.textContent = r.ok ? 'Contraseña actualizada. Se cerraron tus otras sesiones.' : j.error || 'No se pudo cambiar';
+      if (r.ok) e.target.reset();
+    };
   });
 }
 
@@ -88,19 +127,24 @@ async function load() {
   const data = await r.json();
   if (!r.ok) { $('#view').innerHTML = `<div class="empty">${esc(data.error || 'No se pudo cargar')}</div>`; return; }
   db = data.db;
+  me = data.me;
+  profile = { id: me.memberId && db.team.some((m) => m.id === me.memberId) ? me.memberId : null, name: me.name };
+  document.body.classList.toggle('member', !isAdmin());
   providers = data.providers || {};
   storage = data.storage || 'archivo';
   if (!project() && db.projects.length) ui.projectId = db.projects[0].id;
   if (!db.projects.length && ui.view === 'proyecto') ui.view = 'cartera';
-  // Si la persona del perfil ya no está en el equipo, se conserva solo su nombre
-  if (profile?.id && !db.team.some((m) => m.id === profile.id)) setProfile({ id: null, name: profile.name });
-  if (!ui.profileApplied && profile) { ui.boardMember = profile.id || ''; ui.chatState = loadChat(aiCfg().provider); }
+  if (!ui.profileApplied) { ui.boardMember = profile.id || ''; ui.chatState = loadChat(aiCfg().provider); }
   ui.profileApplied = true;
+  if (!isAdmin() && ['equipo', 'plantillas', 'config', 'usuarios'].includes(ui.view)) ui.view = 'mis';
   recompute();
   render();
-  if (!profile) openProfilePicker();
 }
-function recompute() { sched = S.schedulePortfolioWithBaseline(db, S.nowLocalString()); }
+// Los proyectos sin acceso llegan solo como carga de trabajo (sin nombres) para que las fechas sean reales
+function recompute() {
+  const forSchedule = db.hiddenLoad?.length ? { ...db, projects: [...db.projects, ...db.hiddenLoad] } : db;
+  sched = S.schedulePortfolioWithBaseline(forSchedule, S.nowLocalString());
+}
 
 let saveTimer = null;
 function commit({ rerender = true } = {}) {
@@ -147,6 +191,7 @@ function render() {
       equipo: ['Equipo', 'Personas, rol y dedicación; se comparten entre proyectos según prioridad', viewEquipo],
       plantillas: ['Plantillas', 'Arranca proyectos repetibles en segundos', viewPlantillas],
       config: ['Calendario y configuración', 'Horario laboral, días festivos, factor de enfoque y respaldo', viewConfig],
+      usuarios: ['Usuarios', 'Cuentas, roles y a qué persona del Equipo corresponde cada una', viewUsuarios],
     };
     const [t, sub, fn] = map[ui.view] || map.cartera;
     $('#pageTitle').textContent = t;
@@ -162,10 +207,7 @@ function storageWarning() {
 }
 
 function renderSidebar() {
-  const me = profile?.id ? db.team.find((m) => m.id === profile.id) : null;
-  $('#profileChip').innerHTML = profile
-    ? `<span class="dot" style="background:${profile.id ? memberColor(profile.id) : 'var(--muted)'}"></span><span class="profile-name" title="${esc(profile.name)}">${esc(profile.name)}${me?.role ? ` <span class="muted small">· ${esc(me.role)}</span>` : ''}</span><a href="#" data-act="profile">Cambiar</a>`
-    : '<a href="#" data-act="profile">¿Quién eres? Elige tu perfil</a>';
+  $('#profileChip').innerHTML = `<span class="dot" style="background:${profile.id ? memberColor(profile.id) : 'var(--muted)'}"></span><span class="profile-name" title="${esc(me.email)}">${esc(me.name)} <span class="muted small">· ${isAdmin() ? 'Admin' : 'Miembro'}</span></span><a href="#" data-act="profile">Mi cuenta</a>`;
   const mine = profile?.id ? myTasks().filter((x) => x.t.status !== 'done').length : 0;
   $('#myCount').textContent = mine ? String(mine) : '';
   $('#myCount').hidden = !mine;
@@ -173,40 +215,11 @@ function renderSidebar() {
     .slice()
     .sort((a, b) => (a.status === 'archivado') - (b.status === 'archivado') || (a.priority || 99) - (b.priority || 99))
     .map((p) => `<a href="#" data-project="${p.id}" class="${ui.view === 'proyecto' && ui.projectId === p.id ? 'active' : ''}" style="${p.status === 'archivado' ? 'opacity:.55' : ''}"><span class="dot" style="background:${projectColor(p)}"></span>${esc(p.name)}</a>`)
-    .join('') || '<div class="muted small" style="padding:6px 8px">Sin proyectos. Crea uno o pídeselo al agente.</div>';
+    .join('') || `<div class="muted small" style="padding:6px 8px">${isAdmin() ? 'Sin proyectos. Crea uno o pídeselo al agente.' : 'No tienes proyectos asignados. Pide a un administrador que te agregue en “Editar proyecto → Personas asignadas”.'}</div>`;
   $$('.navlink').forEach((a) => a.classList.toggle('active', ui.view === a.dataset.view));
 }
 
-// ================= perfil ligero =================
-function openProfilePicker() {
-  openModal('¿Quién eres?', `
-    <p class="muted small">Elige tu nombre para ver tus tareas y para que tus cambios queden firmados en la actividad. Se recuerda en este navegador. No es una cuenta con contraseña propia: cualquiera puede elegir cualquier nombre.</p>
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin:10px 0">
-      ${db.team.map((m) => `<button class="btn" data-pick="${m.id}" style="justify-content:flex-start;padding:10px 12px"><span class="dot" style="background:${memberColor(m.id)}"></span><span style="text-align:left"><strong>${esc(m.name)}</strong><br><span class="muted small">${esc(m.role || 'Sin rol')} · ${Math.round((Number(m.allocation) || 1) * 100)} %</span></span></button>`).join('') || '<span class="muted small">Todavía no hay personas en el Equipo.</span>'}
-    </div>
-    <form id="otherForm" class="row">
-      <label class="field" style="flex:1">¿No estás en la lista? Escribe tu nombre<input name="name" maxlength="60" placeholder="Por ejemplo: Laura (Dirección)"></label>
-      <button class="btn" type="submit" style="align-self:flex-end">Entrar</button>
-    </form>
-    <p class="muted small">Para que aparezcas en la lista y se te asignen tareas, agrégate en <strong>Equipo</strong>.</p>`, (el) => {
-    $$('[data-pick]', el).forEach((b) => b.addEventListener('click', () => {
-      const m = db.team.find((x) => x.id === b.dataset.pick);
-      setProfile({ id: m.id, name: m.name });
-      closeModal();
-      ui.view = 'mis';
-      render();
-    }));
-    $('#otherForm', el).onsubmit = (e) => {
-      e.preventDefault();
-      const name = String(new FormData(e.target).get('name') || '').trim();
-      if (!name) return;
-      setProfile({ id: null, name });
-      closeModal();
-      render();
-    };
-  });
-}
-
+// ================= mis tareas =================
 // Tareas de la persona del perfil (asignadas a mano o por el planificador), en todos los proyectos activos
 function myTasks() {
   if (!profile?.id) return [];
@@ -222,9 +235,8 @@ function myTasks() {
 }
 
 function viewMisTareas() {
-  if (!profile) { $('#view').innerHTML = '<div class="empty"><button class="btn primary" data-act="profile">Elegir mi perfil</button></div>'; return; }
   if (!profile.id) {
-    $('#view').innerHTML = `<div class="empty">Entraste como <strong>${esc(profile.name)}</strong>, que no está en el Equipo, así que no tienes tareas asignadas.<br><br><button class="btn" data-act="profile">Cambiar de perfil</button> <button class="btn" data-view="equipo">Ir a Equipo</button></div>`;
+    $('#view').innerHTML = `<div class="empty">Tu cuenta no está ligada a una persona del Equipo, así que no tienes tareas asignadas.<br><br>${isAdmin() ? '<button class="btn" data-view="usuarios">Ligar mi cuenta en Usuarios</button>' : 'Pídele a un administrador que la ligue en <strong>Usuarios</strong>.'}</div>`;
     return;
   }
   const all = myTasks();
@@ -299,7 +311,92 @@ function activityList(entries) {
 function viewActividad(p) {
   const entries = (db.activity || []).filter((e) => e.projectId === p.id).slice(0, 200);
   $('#view').innerHTML = `<div class="card">${activityList(entries)}</div>
-    <p class="muted small">Cada cambio se firma con el nombre del perfil elegido. Los cambios hechos por el agente dicen “vía agente”.</p>`;
+    <p class="muted small">Cada cambio se firma con el nombre de la cuenta que lo hizo. Los cambios hechos por el agente dicen “vía agente”.</p>`;
+}
+
+// ================= usuarios (solo administradores) =================
+async function viewUsuarios() {
+  if (!isAdmin()) { $('#view').innerHTML = '<div class="empty">Solo un administrador puede ver esta sección.</div>'; return; }
+  $('#view').innerHTML = '<div class="empty">Cargando…</div>';
+  const r = await api('/api/users');
+  const j = await r.json();
+  if (!r.ok) { $('#view').innerHTML = `<div class="empty">${esc(j.error)}</div>`; return; }
+  const users = j.users;
+  const teamOpts = (sel) => `<option value="">— Ninguna —</option>${db.team.map((m) => `<option value="${m.id}" ${sel === m.id ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}`;
+  const linked = new Set(users.map((u) => u.memberId).filter(Boolean));
+  $('#view').innerHTML = `
+    <div class="card" style="margin-bottom:12px">
+      <h2>Cómo funcionan los permisos</h2>
+      <ul class="small" style="margin:0;padding-left:18px">
+        <li><strong>Administrador:</strong> ve y edita todo: proyectos, equipo, configuración, plantillas y usuarios.</li>
+        <li><strong>Miembro:</strong> ve solo los proyectos donde está asignado (en “Editar proyecto → Personas asignadas”) y los que no tienen personas marcadas (de todo el equipo). Puede trabajar las tareas de esos proyectos, pero no crear o borrar proyectos ni cambiar equipo o configuración.</li>
+        <li>Liga cada cuenta con su persona del <strong>Equipo</strong> para que tenga “Mis tareas” y los permisos por proyecto.</li>
+      </ul>
+    </div>
+    <div class="table-wrap"><table class="data" id="usersTable"><thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Persona del Equipo</th><th>Alta</th><th></th></tr></thead><tbody>
+      ${users.map((u) => `<tr data-uid="${u.id}">
+        <td><input data-f="name" value="${esc(u.name)}">${u.id === me.id ? ' <span class="pill">tú</span>' : ''}</td>
+        <td class="small">${esc(u.email)}</td>
+        <td style="width:140px"><select data-f="role"><option value="miembro" ${u.role !== 'admin' ? 'selected' : ''}>Miembro</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrador</option></select></td>
+        <td style="width:180px"><select data-f="memberId">${teamOpts(u.memberId)}</select></td>
+        <td class="small">${S.fmtDate(u.createdAt)}</td>
+        <td style="white-space:nowrap"><button class="btn small" data-act="user-reset">Restablecer contraseña</button>${u.id === me.id ? '' : '<button class="btn ghost small danger" data-act="user-del">✕</button>'}</td>
+      </tr>`).join('')}
+    </tbody></table></div>
+    <form id="newUser" class="card" style="margin-top:12px">
+      <h2>Agregar usuario</h2>
+      <div class="form-grid">
+        <label class="field">Nombre<input name="name" required maxlength="60"></label>
+        <label class="field">Correo<input name="email" type="email" required></label>
+        <label class="field">Rol<select name="role"><option value="miembro">Miembro</option><option value="admin">Administrador</option></select></label>
+        <label class="field">Persona del Equipo<select name="memberId">${teamOpts(db.team.find((m) => !linked.has(m.id))?.id || '')}</select></label>
+        <label class="field">Contraseña inicial<input name="password" required minlength="10" value="${genPassword()}"></label>
+      </div>
+      <p class="muted small">Comparte la contraseña inicial por un canal privado y pide que la cambien en “Mi cuenta”. La URL de la app es ${esc(location.origin)}.</p>
+      <p class="pill bad" id="userErr" hidden></p>
+      <div class="row"><span class="spacer"></span><button class="btn primary" type="submit">Crear usuario</button></div>
+    </form>`;
+
+  const call = async (method, body) => {
+    const res = await api('/api/users', { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { alert(out.error || 'No se pudo guardar'); return false; }
+    return true;
+  };
+  $('#usersTable').addEventListener('change', async (e) => {
+    const id = e.target.closest('tr').dataset.uid;
+    if (await call('PUT', { id, [e.target.dataset.f]: e.target.value }) && id === me.id) return load();
+    viewUsuarios();
+  });
+  $('#usersTable').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    e.stopPropagation();
+    const id = b.closest('tr').dataset.uid;
+    const name = b.closest('tr').querySelector('[data-f=name]').value;
+    if (b.dataset.act === 'user-reset') {
+      const pw = prompt(`Nueva contraseña para ${name} (mínimo 10 caracteres). Cierra sus sesiones abiertas:`, genPassword());
+      if (pw && await call('PUT', { id, password: pw })) alert(`Contraseña de ${name} actualizada. Compártela por un canal privado.`);
+    }
+    if (b.dataset.act === 'user-del' && confirm(`¿Eliminar la cuenta de ${name}? Ya no podrá entrar. Sus tareas y su historial se conservan.`)) {
+      if (await call('DELETE', { id })) viewUsuarios();
+    }
+  }, true);
+  $('#newUser').onsubmit = async (e) => {
+    e.preventDefault();
+    const body = Object.fromEntries(new FormData(e.target));
+    const res = await api('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { const er = $('#userErr'); er.textContent = out.error; er.hidden = false; return; }
+    alert(`Usuario creado.\n\nCorreo: ${body.email}\nContraseña inicial: ${body.password}\n\nCompártela por un canal privado.`);
+    viewUsuarios();
+  };
+}
+
+function genPassword() {
+  const w = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const a = crypto.getRandomValues(new Uint8Array(16));
+  return [...a].map((b) => w[b % w.length]).join('').match(/.{4}/g).join('-');
 }
 
 // ================= vista: resumen =================
@@ -338,12 +435,12 @@ function viewResumen(p) {
   $('#view').innerHTML = `
     <div class="grid kpis">${kpis.map(([l, v, hnt]) => `<div class="card kpi"><div class="label">${l}</div><div class="value">${v}</div><div class="hint">${hnt}</div></div>`).join('')}</div>
     <div class="row" style="margin-bottom:12px">
-      <button class="btn" data-act="edit-project">Editar proyecto</button>
-      <button class="btn" data-act="baseline" title="Guarda las fechas actuales para medir desviaciones">${p.baseline ? 'Actualizar línea base' : 'Fijar línea base'}</button>
-      <button class="btn" data-act="save-template">Guardar como plantilla</button>
+      <button class="admin-only btn" data-act="edit-project">Editar proyecto</button>
+      <button class="admin-only btn" data-act="baseline" title="Guarda las fechas actuales para medir desviaciones">${p.baseline ? 'Actualizar línea base' : 'Fijar línea base'}</button>
+      <button class="admin-only btn" data-act="save-template">Guardar como plantilla</button>
       <button class="btn" data-act="export-csv">Exportar CSV</button>
       <span class="spacer"></span>
-      <button class="btn danger" data-act="delete-project">Eliminar</button>
+      <button class="admin-only btn danger" data-act="delete-project">Eliminar</button>
     </div>
     ${alerts.length ? `<div class="card" style="margin-bottom:12px">${alerts.map(([k, m]) => `<div style="margin:4px 0"><span class="pill ${k}">${k === 'bad' ? 'Riesgo' : k === 'warn' ? 'Atención' : 'Nota'}</span> ${m}</div>`).join('')}</div>` : ''}
     <div class="two-col">
@@ -750,7 +847,7 @@ function viewCartera() {
     ${active.sort((a, b) => (a.priority || 99) - (b.priority || 99)).map((p, i) => {
       const sp = sched.projects[p.id];
       return `<tr><td>${i + 1}</td><td><a href="#" data-project="${p.id}">${esc(p.name)}</a></td><td>${S.fmtDate(p.startDate)}</td><td>${S.fmtDate(sp.end)}</td><td class="num">${h1(sp.totalHours)}</td><td>${Math.round(sp.progress * 100)} %</td>
-      <td><button class="btn ghost small" data-prio="${p.id}" data-dir="-1">↑</button><button class="btn ghost small" data-prio="${p.id}" data-dir="1">↓</button></td></tr>`;
+      <td><span class="admin-only"><button class="btn ghost small" data-prio="${p.id}" data-dir="-1">↑</button><button class="btn ghost small" data-prio="${p.id}" data-dir="1">↓</button></span></td></tr>`;
     }).join('') || '<tr><td colspan="7" class="empty">Sin proyectos activos</td></tr>'}</tbody></table></div></div>`;
   html += `<div class="card"><h2>Carga semanal por persona (próximas 12 semanas)</h2>
     <div class="legend"><span><i class="box" style="background:var(--good-bg)"></i>Con capacidad libre</span><span><i class="box" style="background:#86b6ef"></i>Ocupación media</span><span><i class="box" style="background:#1c5cab"></i>Ocupación completa</span></div>
@@ -952,13 +1049,21 @@ function viewConfig() {
 }
 
 // ================= modales =================
-function openModal(title, html, onMount) {
+function openModal(title, html, onMount, { locked = false } = {}) {
+  ui.modalLocked = locked;
   $('#modalTitle').textContent = title;
   $('#modalBody').innerHTML = html;
+  $('#modalClose').hidden = locked;
   $('#modal').hidden = false;
   onMount?.($('#modalBody'));
+  $('#modalBody').querySelector('input:not([type=hidden])')?.focus();
 }
-const closeModal = () => { $('#modal').hidden = true; };
+// Las pantallas de acceso no se pueden cerrar con Escape ni con clic afuera
+const closeModal = (force = false) => {
+  if (ui.modalLocked && force !== true) return;
+  ui.modalLocked = false;
+  $('#modal').hidden = true;
+};
 
 function nextMonday() {
   const today = S.dayNum(S.nowLocalString());
@@ -1165,7 +1270,7 @@ document.addEventListener('click', (e) => {
       break;
     }
     case 'ai-settings': e.preventDefault(); openAiSettings(); break;
-    case 'profile': e.preventDefault(); openProfilePicker(); break;
+    case 'profile': e.preventDefault(); openAccountMenu(); break;
     case 'ai-add': {
       const name = prompt('Nombre del tipo de trabajo (debe coincidir con el rol o la fase de las tareas):');
       if (name && db.settings.ai.factors[name.trim()] == null) { db.settings.ai.factors[name.trim()] = 0.7; commit(); }
@@ -1561,4 +1666,4 @@ $('#btnAiSettings').onclick = openAiSettings;
 
 // Recalcular "hoy" cada 5 minutos
 setInterval(() => { if (db && $('#modal').hidden) { recompute(); render(); } }, 5 * 60 * 1000);
-load();
+(async () => { await showLogin(); await load(); })();

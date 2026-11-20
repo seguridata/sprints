@@ -196,3 +196,8 @@ label.field input, label.field select, label.field textarea { font: inherit; fon
 .profile-chip a { font-size: 12px; white-space: nowrap; }
 .activity-row { padding: 6px 0; border-bottom: 1px solid var(--grid); line-height: 1.4; }
 .activity-row:last-child { border-bottom: 0; }
+
+/* Los miembros no ven los controles de administración (el servidor también los rechaza) */
+body.member .admin-only { display: none !important; }
+
+[hidden] { display: none !important; }

@@ -15,15 +15,29 @@ Herramienta local para planificar proyectos por sprints. Le platicas cada proyec
 | **Cartera** | Todos los proyectos en una línea de tiempo, su prioridad, y un mapa de carga semanal por persona para ver dónde cabe un proyecto nuevo. |
 | **Plantillas** | Proyectos que se repiten (web, integración API, implementación en cliente). Puedes guardar cualquier proyecto como plantilla; usa las horas reales para que la siguiente estimación salga más precisa. |
 
-## Perfiles (ligeros)
+## Cuentas y permisos
 
-Al entrar, cada persona elige su nombre de la lista del **Equipo** (o escribe uno, si no está en la lista). La app lo recuerda en ese navegador.
+Cada persona entra con **su correo y su contraseña**. Las contraseñas se guardan cifradas (scrypt) y la sesión dura 7 días en una cookie firmada.
 
-- **Mis tareas:** lo que tienes asignado en todos los proyectos (a mano o por el planificador), con horas pendientes, tareas de la semana y la fecha en que te desocupas. Desde ahí cambias el estado y registras horas restantes y reales.
-- **Tablero:** abre filtrado a tus tareas.
-- **Actividad:** cada cambio queda firmado con el nombre del perfil. Lo genera el servidor comparando antes y después de cada guardado. Los cambios del agente aparecen como "Nombre (vía agente)". Se ve en la pestaña *Actividad* de cada proyecto y en *Cartera*.
-- **Preferencias del agente:** el proveedor y el modelo se guardan por perfil en el servidor. La API key propia y el historial del chat se quedan solo en el navegador.
-- **No es autenticación:** todos entran con la misma `APP_PASSWORD` y cualquiera puede elegir cualquier nombre. Para cuentas individuales con su propio inicio de sesión haría falta un proveedor de identidad (Microsoft Entra ID, Google, Clerk…).
+**Primer arranque:** la primera persona que abre la app crea la cuenta de **administrador**. En Vercel se pide un **código de instalación** (`SETUP_CODE`, o `APP_PASSWORD` si ya existía), para que nadie más pueda adelantarse.
+
+**Roles**
+
+| | Administrador | Miembro |
+|---|---|---|
+| Proyectos que ve | Todos | Los que tienen asignada a su persona del Equipo, y los que no tienen personas marcadas (de todo el equipo) |
+| Tareas de esos proyectos | Crear, editar, borrar | Crear, editar, borrar |
+| Crear, editar o borrar proyectos; línea base; prioridades | Sí | No |
+| Equipo, plantillas, calendario, factores de IA | Sí | No |
+| Usuarios | Sí | No |
+| Agente | Todo lo anterior | Las mismas restricciones (no puede crear proyectos ni ver los ajenos) |
+
+- **Usuarios** (solo administradores): alta de cuentas con contraseña inicial, rol, persona del Equipo ligada, restablecer contraseña y baja.
+- **Mi cuenta** (en la barra lateral): cambiar la contraseña (cierra las demás sesiones) y cerrar sesión.
+- **Mis tareas:** las tareas de la persona del Equipo ligada a tu cuenta.
+- **Actividad:** cada cambio queda firmado con el nombre de la cuenta; lo genera el servidor.
+- **Privacidad entre proyectos:** el servidor solo envía los proyectos que puedes ver y rechaza cambios fuera de tu rol. De los proyectos sin acceso solo llega la carga de trabajo, sin nombres ni descripciones, para que las fechas de las personas compartidas salgan correctas.
+- **En tu navegador** quedan tu API key propia y tu historial del chat, separados por cuenta.
 
 ## Cómo calcula los tiempos
 
@@ -93,7 +107,8 @@ El proyecto ya está preparado: la interfaz se sirve como sitio estático y `/ap
 
 | Variable | Para qué |
 |---|---|
-| `APP_PASSWORD` | Contraseña para entrar. **Ponla siempre**: sin ella cualquiera con la URL ve los proyectos y gasta tus API keys. |
+| `SESSION_SECRET` | **Obligatoria.** Firma las sesiones. Genera un valor aleatorio largo (ver `.env.example`). |
+| `SETUP_CODE` (o `APP_PASSWORD`) | **Obligatoria.** Código para crear la primera cuenta de administrador. |
 | `ANTHROPIC_API_KEY` y/o `OPENAI_API_KEY` | Llaves del servidor (opcionales si cada usuario usa la suya). |
 | `ANTHROPIC_WORKSPACE_ID` | Solo si la llave de Claude empieza con `sk-ant-usr-`. |
 | `APP_TIMEZONE` | Opcional; por defecto `America/Mexico_City` (los servidores de Vercel usan UTC). |
