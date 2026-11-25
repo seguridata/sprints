@@ -1133,9 +1133,12 @@ function nextMonday() {
   return S.dayStr(today + ((8 - wd) % 7 || 7));
 }
 
-function openProjectModal(existing, templateId) {
+function openProjectModal(existing, templateId, mode) {
   const p = existing || { name: '', client: '', description: '', startDate: nextMonday(), sprintWeeks: db.settings.sprintWeeks, priority: db.projects.length + 1, members: [] };
+  // Proyecto nuevo: por defecto se arma con IA a partir de documentos (salvo que venga de una plantilla)
+  if (!existing && (mode || (templateId ? 'manual' : 'docs')) === 'docs') return openProjectFromDocsModal();
   openModal(existing ? 'Editar proyecto' : 'Nuevo proyecto', `
+    ${existing ? '' : `<div class="seg-tabs"><button type="button" class="seg" data-mode="docs">Desde documentos (IA)</button><button type="button" class="seg active">Manual</button></div>`}
     <form id="projForm" class="grid">
       <div class="form-grid">
         <label class="field">Nombre<input name="name" required value="${esc(p.name)}"></label>
@@ -1151,6 +1154,7 @@ function openProjectModal(existing, templateId) {
         <div class="row">${db.team.map((m) => `<label class="pill"><input type="checkbox" name="members" value="${m.id}" ${p.members?.includes(m.id) ? 'checked' : ''}> ${esc(m.name)}</label>`).join('') || '<span class="muted small">Sin equipo registrado</span>'}</div></div>
       <div class="row"><span class="spacer"></span><button class="btn primary" type="submit">${existing ? 'Guardar' : 'Crear proyecto'}</button></div>
     </form>`, (el) => {
+    $('[data-mode=docs]', el)?.addEventListener('click', () => openProjectFromDocsModal());
     $('#projForm', el).onsubmit = (e) => {
       e.preventDefault();
       const f = new FormData(e.target);
@@ -1174,6 +1178,99 @@ function openProjectModal(existing, templateId) {
       }
       closeModal();
       commit();
+    };
+  });
+}
+
+// Nuevo proyecto a partir de documentos: la IA identifica el proyecto, las tareas y los tiempos
+function openProjectFromDocsModal() {
+  let files = [];
+  const cfg = aiCfg();
+  const info = providers[cfg.provider];
+  const ready = Boolean(cfg.key(cfg.provider) || info?.serverKey);
+  openModal('Nuevo proyecto', `
+    <div class="seg-tabs"><button type="button" class="seg active">Desde documentos (IA)</button><button type="button" class="seg" data-mode="manual">Manual</button></div>
+    <form id="docForm" class="grid">
+      <p class="muted small" style="margin:0">Sube la minuta, los requerimientos o la propuesta. El agente identifica el proyecto, desglosa las tareas con su fase, rol y dependencias, calcula los tiempos con IA y el horario del equipo, y lo acomoda en sprints.</p>
+      ${ready ? '' : `<p class="login-error" style="text-align:left">No hay API key de ${esc(info?.label || 'IA')}. Configúrala en Ajustes del agente o en el servidor.</p>`}
+      <label class="dropzone" id="dropZone">
+        <input type="file" id="docFiles" multiple accept=".pdf,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.webp,.gif" hidden>
+        <strong>Arrastra aquí los documentos</strong> o da clic para elegirlos
+        <span class="muted small">PDF, texto, Markdown, CSV o imágenes · Word: guárdalo como PDF · máx. ~3 MB en total</span>
+      </label>
+      <div id="docList" class="attachments"></div>
+      <label class="field">Indicaciones adicionales (opcional)<textarea name="notes" rows="3" placeholder="Ej.: es para el cliente X, solo la fase 1; la integración con SAT ya existe; Dev 1 solo al 50 %."></textarea></label>
+      <div class="form-grid">
+        <label class="field">Fecha de inicio<input name="startDate" type="date" required value="${nextMonday()}"></label>
+        <label class="field">Semanas por sprint<input name="sprintWeeks" type="number" min="1" max="4" value="${db.settings.sprintWeeks}"></label>
+        <label class="field">Prioridad (1 = más alta)<input name="priority" type="number" min="1" value="${db.projects.length + 1}"></label>
+      </div>
+      <div><div class="muted small" style="margin-bottom:4px">Personas asignadas (ninguna marcada = todo el equipo)</div>
+        <div class="row">${db.team.map((m) => `<label class="pill"><input type="checkbox" name="members" value="${m.id}"> ${esc(m.name)}</label>`).join('') || '<span class="muted small">Sin equipo registrado</span>'}</div></div>
+      <p class="login-error" id="docError" hidden style="text-align:left"></p>
+      <div class="row"><span class="muted small" id="docStatus"></span><span class="spacer"></span><button class="btn primary" type="submit" ${ready ? '' : 'disabled'}>Analizar y crear proyecto</button></div>
+    </form>`, (el) => {
+    $('[data-mode=manual]', el).addEventListener('click', () => openProjectModal(null, null, 'manual'));
+    const zone = $('#dropZone', el);
+    const showError = (m) => { const er = $('#docError', el); er.textContent = m; er.hidden = !m; };
+    const renderList = () => {
+      $('#docList', el).innerHTML = files.map((f, i) => `<span class="pill">📎 ${esc(f.name)} <a href="#" data-rmdoc="${i}">✕</a></span>`).join('');
+    };
+    const addFiles = async (list) => {
+      showError('');
+      for (const f of list) {
+        try { files.push(await readAttachment(f)); } catch (err) { showError(err.message); }
+      }
+      if (attachSize(files) > MAX_ATTACH_BYTES) showError('Los documentos pesan más de ~3 MB en total y el servidor podría rechazarlos. Quita alguno o usa versiones más ligeras.');
+      renderList();
+    };
+    $('#docFiles', el).onchange = (e) => { addFiles([...e.target.files]); e.target.value = ''; };
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drop'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drop'));
+    zone.addEventListener('drop', (e) => { e.preventDefault(); zone.classList.remove('drop'); addFiles([...e.dataTransfer.files]); });
+    $('#docList', el).addEventListener('click', (e) => {
+      const i = e.target.dataset?.rmdoc;
+      if (i == null) return;
+      e.preventDefault();
+      files.splice(Number(i), 1);
+      renderList();
+    });
+    $('#docForm', el).onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const notes = String(f.get('notes') || '').trim();
+      if (!files.length && !notes) { showError('Sube al menos un documento o escribe la descripción del proyecto.'); return; }
+      const memberIds = f.getAll('members');
+      const memberText = memberIds.length
+        ? memberIds.map((id) => `${memberName(id)} (id ${id})`).join(', ')
+        : 'todo el equipo (no envíes miembros)';
+      const instruction = `Crea un proyecto NUEVO a partir de ${files.length ? 'los documentos adjuntos' : 'esta descripción'}.
+- Identifica el proyecto: nombre corto y claro, cliente (si aparece) y una descripción del alcance.
+- Desglosa TODAS las tareas necesarias para terminarlo (tareas de 2 a 16 h tradicionales), con fase, rol y dependencias. Incluye análisis, QA, despliegue y cierre aunque el documento no los mencione.
+- Usa plantillas solo si encajan; si no, crea las tareas desde cero.
+- Datos del proyecto: fecha_inicio ${f.get('startDate')}, semanas_sprint ${f.get('sprintWeeks')}, prioridad ${f.get('priority')}, miembros: ${memberText}.
+- No me hagas preguntas: si falta información, haz supuestos razonables, créalo con crear_proyecto y lista los supuestos al final.
+- Al terminar resume: nombre, fecha estimada de término, número de sprints, horas con y sin IA, y los riesgos o puntos a confirmar.${notes ? `
+
+Indicaciones adicionales del usuario:
+${notes}` : ''}`;
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true;
+      $('#docStatus', el).textContent = 'El agente está leyendo los documentos y armando el plan… puede tardar 1 o 2 minutos.';
+      ui.chatOpen = true;
+      localSet('chatOpen', '1');
+      const res = await sendToAgent(instruction, files);
+      if (!res.ok) {
+        btn.disabled = false;
+        $('#docStatus', el).textContent = '';
+        showError(res.error);
+        return;
+      }
+      closeModal();
+      if (!res.created) {
+        render();
+        alert('El agente respondió, pero no creó el proyecto. Revisa su respuesta en el panel Agente y contéstale para continuar.');
+      }
     };
   });
 }
@@ -1649,14 +1746,23 @@ $('#attachments').addEventListener('click', (e) => {
 });
 
 // Adjuntos en formato neutral; el servidor los convierte al formato de cada proveedor
+// Convierte un archivo en adjunto neutral (el servidor lo adapta a Claude o ChatGPT)
+async function readAttachment(f) {
+  const name = f.name;
+  if (/\.pdf$/i.test(name)) return { name, kind: 'pdf', mediaType: 'application/pdf', data: await toBase64(f) };
+  if (/^image\//.test(f.type)) return { name, kind: 'image', mediaType: f.type, data: await toBase64(f) };
+  if (/\.docx?$/i.test(name)) throw new Error(`${name}: los archivos de Word no se pueden leer. Guárdalo como PDF o pega el texto.`);
+  return { name, kind: 'text', mediaType: 'text/plain', data: await f.text() };
+}
+// En Vercel cada envío admite ~4.5 MB; los archivos en base64 crecen ~33 %
+const MAX_ATTACH_BYTES = 3.2 * 1024 * 1024;
+const attachSize = (list) => list.reduce((a, x) => a + (x.data?.length || 0), 0);
+
 $('#fileInput').onchange = async (e) => {
   for (const f of e.target.files) {
-    if (f.size > 25 * 1024 * 1024) { alert(`${f.name} supera 25 MB`); continue; }
-    const name = f.name;
-    if (/\.pdf$/i.test(name)) ui.attachments.push({ name, kind: 'pdf', mediaType: 'application/pdf', data: await toBase64(f) });
-    else if (/^image\//.test(f.type)) ui.attachments.push({ name, kind: 'image', mediaType: f.type, data: await toBase64(f) });
-    else ui.attachments.push({ name, kind: 'text', mediaType: 'text/plain', data: await f.text() });
+    try { ui.attachments.push(await readAttachment(f)); } catch (err) { alert(err.message); }
   }
+  if (attachSize(ui.attachments) > MAX_ATTACH_BYTES) alert('Los adjuntos pesan más de ~3 MB en total; puede que el servidor los rechace. Usa archivos más ligeros o pega el texto.');
   e.target.value = '';
   renderChat();
 };
@@ -1673,21 +1779,18 @@ $('#chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#chatForm').requestSubmit(); }
 });
 
-$('#chatForm').onsubmit = async (e) => {
-  e.preventDefault();
-  const text = $('#chatInput').value.trim();
-  if ((!text && !ui.attachments.length) || ui.sending) return;
+// Envía un mensaje (con adjuntos) al agente y actualiza la conversación y los datos.
+// Devuelve { ok, created } donde `created` es el proyecto nuevo si el agente creó uno.
+async function sendToAgent(text, attachments = []) {
   const cfg = aiCfg();
   const provider = cfg.provider;
-  const attachments = ui.attachments;
   const prev = ui.chatState;
+  const msg = text || 'Analiza el/los archivo(s) adjunto(s) y propón cómo planificarlo.';
   // vista optimista
-  const preview = [...attachments.map((a) => ({ type: 'document', title: a.name })), { type: 'text', text: text || 'Analiza el/los archivo(s) adjunto(s) y propón cómo planificarlo.' }];
+  const preview = [...attachments.map((a) => ({ type: 'document', title: a.name })), { type: 'text', text: msg }];
   ui.chatState = { ...prev, messages: [...prev.messages, { role: 'user', content: preview }] };
   ui.sending = true;
   ui.chatError = null;
-  ui.attachments = [];
-  $('#chatInput').value = '';
   renderChat();
   try {
     const r = await api('/api/chat', {
@@ -1695,12 +1798,12 @@ $('#chatForm').onsubmit = async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         provider, model: cfg.model(provider) || undefined, apiKey: cfg.key(provider) || undefined,
-        history: prev.messages, text: text || 'Analiza el/los archivo(s) adjunto(s) y propón cómo planificarlo.',
+        history: prev.messages, text: msg,
         attachments: attachments.map(({ name, kind, mediaType, data }) => ({ name, kind, mediaType, data })),
         projectId: ui.view === 'proyecto' ? ui.projectId : null,
       }),
     });
-    const data = await r.json();
+    const data = await r.json().catch(() => ({ error: r.status === 413 ? 'Los archivos son demasiado grandes.' : `Error del servidor (${r.status})` }));
     if (!r.ok) throw new Error(data.error || 'Error del servidor');
     const usage = { ...(prev.usage || {}) };
     if (data.usage) usage[data.messages.length - 1] = { ...data.usage, model: data.model };
@@ -1708,21 +1811,33 @@ $('#chatForm').onsubmit = async (e) => {
     if (data.stopReason === 'refusal') ui.chatError = 'El modelo no pudo atender esta solicitud. Intenta reformularla.';
     if (data.stopReason === 'max_tokens' || data.stopReason === 'length') ui.chatError = 'La respuesta se cortó por longitud. Pide que continúe.';
     saveChat();
+    let created = null;
     if (data.changed) {
-      const before = new Set(db.projects.map((p) => p.id));
+      const before = new Set(db.projects.map((x) => x.id));
       await load();
-      const created = db.projects.find((p) => !before.has(p.id));
+      created = db.projects.find((x) => !before.has(x.id)) || null;
       if (created) { ui.projectId = created.id; ui.view = 'proyecto'; ui.tab = 'resumen'; }
     }
+    return { ok: true, created };
   } catch (err) {
     ui.chatState = prev;
     ui.chatError = err.message;
-    ui.attachments = attachments;
-    $('#chatInput').value = text;
+    return { ok: false, error: err.message };
   } finally {
     ui.sending = false;
     render();
   }
+}
+
+$('#chatForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $('#chatInput').value.trim();
+  if ((!text && !ui.attachments.length) || ui.sending) return;
+  const attachments = ui.attachments;
+  ui.attachments = [];
+  $('#chatInput').value = '';
+  const res = await sendToAgent(text, attachments);
+  if (!res.ok) { ui.attachments = attachments; $('#chatInput').value = text; renderChat(); }
 };
 $('#btnClearChat').onclick = () => { ui.chatState = { messages: [], usage: {} }; ui.chatError = null; ui.chatNote = null; saveChat(); renderChat(); };
 $('#btnAiSettings').onclick = openAiSettings;

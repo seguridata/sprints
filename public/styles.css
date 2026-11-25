@@ -226,3 +226,10 @@ body.logged-out .app { display: none; }
 .login-form .login-btn { justify-self: stretch; margin-top: 6px; }
 .login-form label.field input { background: #fff; color: #1f2328; border-color: #d0d4cc; }
 @media (max-width: 520px) { .login-card { padding: 32px 22px 26px; } .login-card h1 { font-size: 24px; } .login-sub { font-size: 15px; } }
+
+/* Nuevo proyecto: pestañas y zona para soltar documentos */
+.seg-tabs { display: inline-flex; background: var(--surface-2); border-radius: 8px; padding: 3px; margin-bottom: 12px; gap: 2px; }
+.seg-tabs .seg { border: 0; background: transparent; color: var(--text-2); font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+.seg-tabs .seg.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.dropzone { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 22px 16px; border: 2px dashed var(--border); border-radius: 10px; cursor: pointer; text-align: center; background: var(--surface-2); }
+.dropzone:hover, .dropzone.drop { border-color: var(--brand-green); background: var(--accent-soft); }
